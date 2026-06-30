@@ -1,394 +1,1469 @@
-"""
-Digital Pavement Management System
-TCG633 - Bridge & Road Maintenance | Individual Project
-
-Single-section quick-entry workflow (dark UI) on top of the same PCI/IRI/Hybrid
-engineering logic used throughout this project. Works as a single standalone
-file - no external data folder required.
-
-Run with:  streamlit run app.py
-"""
+# =============================================================================
+# Digital Pavement Condition Evaluation and Maintenance Decision Tool
+# TCG633 Bridge & Road Maintenance — Individual Project
+# Universiti Teknologi MARA, Cawangan Sarawak
+#
+# Computation logic (PCI weighting/severity factors, classification bands,
+# IRI bands, and the PCI/IRI hybrid rule) is taken directly from the
+# lecturer-provided files:
+#   - TCG633_PCI_IRI_Model.xlsx      (Lookup, PCI_Compute, IRI_Compute sheets)
+#   - TCG633_PCI_IRI_Pro_v2.xlsx     (Lookup, Settings_Summary "Hybrid" logic)
+# Any place where the spreadsheet logic does not cover a case (e.g. a defect
+# type or severity not in the Lookup table) is explicitly flagged as an
+# ASSUMPTION in-app (see "Methodology & Assumptions" page) rather than
+# silently guessed.
+#
+# This file uses Streamlit's native multi-page navigation (st.navigation /
+# st.Page) instead of st.tabs. The practical benefit: only the page the user
+# is currently viewing actually executes and renders — switching pages does
+# not re-run the chart/table-building code of every other page, which is
+# what made the previous tabs-based layout feel sluggish on larger datasets.
+# =============================================================================
 
 import io
+import math
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
 
-st.set_page_config(page_title="Digital Pavement Management System", page_icon="🚧", layout="wide")
+# Plotly is an optional, "nice-to-have" charting dependency. If the deployment
+# environment fails to install it for any reason (e.g. requirements.txt not
+# picked up yet on Streamlit Cloud), the app must NOT crash — it should fall
+# back to Streamlit's built-in charts instead.
+try:
+    import plotly.express as px
+    PLOTLY_OK = True
+except ModuleNotFoundError:
+    PLOTLY_OK = False
 
-# --------------------------------------------------------------------------------------
-# Dark theme (works even without a .streamlit/config.toml - everything below is plain
-# CSS injected into this single file, so the look is independent of deployment setup)
-# --------------------------------------------------------------------------------------
-st.markdown("""
-<style>
-.stApp { background-color: #0e1117; color: #e6e6e6; }
-section[data-testid="stSidebar"] { background-color: #11141b; }
-h1,h2,h3,h4,h5,h6, p, span, label, .stMarkdown { color: #e6e6e6 !important; }
-div[data-testid="stMetricValue"] { color: #ffffff; }
-hr { border-color: #2a2f3a; }
+# openpyxl powers BOTH reading uploaded .xlsx/.xls files AND writing the Excel
+# download. If it fails to import (e.g. a broken Cloud build environment),
+# the app must still work for CSV upload/download — it must never crash.
+try:
+    import openpyxl  # noqa: F401
+    OPENPYXL_OK = True
+except ModuleNotFoundError:
+    OPENPYXL_OK = False
 
-.pms-card {
-  background: #161b24; border: 1px solid #262b36; border-radius: 12px;
-  padding: 22px 26px; margin-bottom: 18px;
-}
-.pms-title { font-size: 2.1rem; font-weight: 800; margin-bottom: 0px; }
-.pms-subtitle { color: #9aa3b2; font-size: 0.95rem; margin-top: -6px; margin-bottom: 22px; }
-.pms-bignum { font-size: 2.6rem; font-weight: 800; line-height: 1.1; }
-.pms-label { color: #9aa3b2; font-size: 0.85rem; text-transform: uppercase; letter-spacing: .04em; }
-.pms-banner {
-  border-radius: 8px; padding: 12px 16px; font-size: 0.98rem; margin-top: 10px;
-  background: #16314f; border: 1px solid #1f4068; color: #cfe3ff;
-}
-.pms-gauge-wrap { margin-top: 18px; }
-.pms-gauge-track {
-  position: relative; height: 10px; border-radius: 6px; margin-top: 10px;
-  background: linear-gradient(to right,
-    #C62828 0%, #C62828 55%, #F9A825 55%, #F9A825 70%,
-    #9CCC65 70%, #9CCC65 85%, #2E7D32 85%, #2E7D32 100%);
-}
-.pms-gauge-dot {
-  position: absolute; top: -5px; width: 20px; height: 20px; border-radius: 50%;
-  background: #ffffff; border: 4px solid var(--dotcolor, #C62828);
-  transform: translateX(-50%); box-shadow: 0 0 6px rgba(0,0,0,.5);
-}
-.pms-pill {
-  display:inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.78rem;
-  font-weight: 700; color: #0e1117;
-}
-
-/* Native widget dark styling */
-button[data-testid^="stBaseButton-secondary"] {
-  background-color: #1b2230 !important; color: #e6e6e6 !important;
-  border: 1px solid #2f3645 !important;
-}
-button[data-testid^="stBaseButton-secondary"]:hover {
-  border-color: #5DADE2 !important; color: #5DADE2 !important;
-}
-input[data-testid="stTextInputRootElement"], div[data-testid="stTextInputRootElement"],
-.stTextInput input, .stNumberInput input, div[data-testid="stNumberInputContainer"] {
-  background-color: #1b2230 !important; color: #e6e6e6 !important;
-  border-color: #2f3645 !important;
-}
-div[data-baseweb="select"] > div {
-  background-color: #1b2230 !important; border-color: #2f3645 !important; color: #e6e6e6 !important;
-}
-div[data-baseweb="popover"] li { background-color: #1b2230 !important; color: #e6e6e6 !important; }
-section[data-testid="stFileUploaderDropzone"] {
-  background-color: #1b2230 !important; border: 1px dashed #2f3645 !important;
-}
-section[data-testid="stFileUploaderDropzone"] button {
-  background-color: #11141b !important; color: #e6e6e6 !important; border: 1px solid #2f3645 !important;
-}
-div[data-testid="stDataFrame"] { border: 1px solid #262b36 !important; border-radius: 8px; }
-</style>
-""", unsafe_allow_html=True)
-
-# --------------------------------------------------------------------------------------
-# Engineering constants (same logic as the rest of the project, single-defect-per-
-# section "quick entry" model - matches how the dataset was supplied: one representative
-# defect record per 100 m section)
-# --------------------------------------------------------------------------------------
-DEFECT_WEIGHTS = {
-    "Longitudinal Crack": 1.0, "Alligator (Fatigue) Crack": 1.6, "Potholes": 2.2,
-    "Raveling": 1.2, "Depression/Sag": 1.4, "Patching (Failed)": 1.8,
-    "Bleeding/Flushing": 1.0, "Rut/Rutting": 1.6,
-}
-SEVERITY_FACTORS = {"Low": 0.6, "Medium": 1.0, "High": 1.4}
-
-BANDS = [
-    (85, 100, "Very Good", "#2E7D32", "Routine Maintenance"),
-    (70, 85, "Good / Satisfactory", "#9CCC65", "Preventive Maintenance"),
-    (55, 70, "Fair", "#F9A825", "Overlay / Corrective Maintenance"),
-    (0, 55, "Poor", "#C62828", "Major Rehabilitation / Reconstruction"),
-]
-
-SEED = [
-    {"Section ID": "S1", "Defect Type": "Longitudinal Crack", "Severity": "Low", "Area Affected (%)": 5, "IRI (m/km)": 1.60},
-    {"Section ID": "S2", "Defect Type": "Potholes", "Severity": "Medium", "Area Affected (%)": 3, "IRI (m/km)": 1.91},
-    {"Section ID": "S3", "Defect Type": "Raveling", "Severity": "Low", "Area Affected (%)": 10, "IRI (m/km)": 2.21},
-    {"Section ID": "S4", "Defect Type": "Alligator (Fatigue) Crack", "Severity": "Medium", "Area Affected (%)": 6, "IRI (m/km)": 2.51},
-    {"Section ID": "S5", "Defect Type": "Depression/Sag", "Severity": "Low", "Area Affected (%)": 4, "IRI (m/km)": 2.01},
-    {"Section ID": "S6", "Defect Type": "Patching (Failed)", "Severity": "High", "Area Affected (%)": 2, "IRI (m/km)": 2.81},
-    {"Section ID": "S7", "Defect Type": "Alligator (Fatigue) Crack", "Severity": "High", "Area Affected (%)": 10, "IRI (m/km)": 3.31},
-    {"Section ID": "S8", "Defect Type": "Potholes", "Severity": "High", "Area Affected (%)": 11, "IRI (m/km)": 3.81},
-    {"Section ID": "S9", "Defect Type": "Patching (Failed)", "Severity": "High", "Area Affected (%)": 20, "IRI (m/km)": 4.51},
-    {"Section ID": "S10", "Defect Type": "Rut/Rutting", "Severity": "High", "Area Affected (%)": 30, "IRI (m/km)": 5.51},
-]
-
-
-def classify(score):
-    for lo, hi, label, color, action in BANDS:
-        if score >= lo:
-            return label, color, action
-    return BANDS[-1][2], BANDS[-1][3], BANDS[-1][4]
-
-
-def iri_to_score(iri):
-    """Piecewise-linear mapping of IRI (m/km) onto the same 0-100 scale as PCI, so
-    that an IRI value classed 'Very Good' always lands in the Very-Good score range
-    (>=85), 'Good' in 70-85, etc. Keeps PCI-based and IRI-based classification
-    consistent when blended into the Hybrid Index below."""
-    if iri <= 2:
-        return 100 - (iri / 2) * 15            # 0->100 ... 2->85
-    if iri <= 3:
-        return 85 - (iri - 2) * 15             # 2->85 ... 3->70
-    if iri <= 4:
-        return 70 - (iri - 3) * 15             # 3->70 ... 4->55
-    return max(0.0, 55 - (iri - 4) * 13.75)    # 4->55 ... 8->0
-
-
-def compute_row(rec, pci_weight):
-    area = float(rec.get("Area Affected (%)", 0) or 0)
-    weight = DEFECT_WEIGHTS.get(rec["Defect Type"], 0)
-    sev = SEVERITY_FACTORS.get(rec["Severity"], 0)
-    deduct = area * weight * sev
-    pci = max(0.0, 100 - min(100, deduct))
-    iri = float(rec.get("IRI (m/km)", 0) or 0)
-    iri_score = iri_to_score(iri)
-    hybrid = pci_weight * pci + (1 - pci_weight) * iri_score
-    label, color, action = classify(hybrid)
-    return {
-        **rec,
-        "PCI": round(pci, 1),
-        "Hybrid Index": round(hybrid, 1),
-        "Final Condition": label,
-        "Condition Color": color,
-        "Maintenance Action": action,
-    }
-
-
-def compute_all(records, pci_weight):
-    if not records:
-        return pd.DataFrame(columns=["Section ID", "Defect Type", "Severity", "Area Affected (%)",
-                                      "IRI (m/km)", "PCI", "Hybrid Index", "Final Condition",
-                                      "Condition Color", "Maintenance Action"])
-    return pd.DataFrame([compute_row(r, pci_weight) for r in records])
-
-
-# --------------------------------------------------------------------------------------
-# Session state
-# --------------------------------------------------------------------------------------
-if "records" not in st.session_state:
-    st.session_state.records = [dict(r) for r in SEED]
-if "last_section" not in st.session_state:
-    st.session_state.last_section = "S1"
-
-# --------------------------------------------------------------------------------------
-# Header
-# --------------------------------------------------------------------------------------
-st.markdown(
-    '<div class="pms-title">🚧 Digital Pavement Management System</div>'
-    '<div class="pms-subtitle">TCG633 — Bridge &amp; Road Maintenance</div>',
-    unsafe_allow_html=True,
+# -----------------------------------------------------------------------------
+# PAGE CONFIG  (must be the very first Streamlit command)
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Pavement Condition Evaluation & Maintenance Decision Tool",
+    page_icon="🛣️",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    pci_weight = st.slider("PCI weighting in Hybrid Index", 0.0, 1.0, 0.6, 0.05,
-                            help="Hybrid Index = (this weight × PCI) + (remainder × IRI-derived score). "
-                                 "PCI captures surface distress; IRI captures ride roughness.")
-    st.caption(
-        "**Limitations:** PCI uses a simplified single-defect deduct value "
-        "(area × defect weighting × severity factor) rather than the full ASTM D6433 "
-        "corrected-deduct-value curve. IRI is converted onto a comparable 0–100 scale "
-        "using a piecewise-linear mapping aligned to JKR roughness bands. Suitable for "
-        "network-level screening, not project-level certification."
+# -----------------------------------------------------------------------------
+# LOOK-UP CONSTANTS  (copied from the lecturer's Lookup sheet)
+# -----------------------------------------------------------------------------
+
+# PCI defect weighting factors — Lookup!A:B
+DEFECT_WEIGHTS = {
+    "Longitudinal Crack": 1.0,
+    "Alligator (Fatigue) Crack": 1.6,
+    "Potholes": 2.2,
+    "Raveling": 1.2,
+    "Depression/Sag": 1.4,
+    "Patching (Failed)": 1.8,
+    "Bleeding/Flushing": 1.0,
+    "Rut/Rutting": 1.6,
+}
+DEFAULT_WEIGHT = 1.0  # ASSUMPTION: used only if an unrecognised defect type is supplied
+
+# PCI severity factors — Lookup!D:E
+SEVERITY_FACTORS = {"Low": 0.6, "Medium": 1.0, "High": 1.4}
+DEFAULT_SEVERITY_FACTOR = 1.0  # ASSUMPTION: "Medium" weighting used if severity is unrecognised
+
+# PCI condition bands — Lookup!G:J  (rank 1 = best ... 4 = worst)
+PCI_RANK_LABEL = {1: "Very Good", 2: "Good / Satisfactory", 3: "Fair", 4: "Poor"}
+PCI_RANK_RECO = {
+    1: "Routine maintenance (cleaning, grass cutting, minor touch-ups)",
+    2: "Preventive maintenance (crack sealing, local patching)",
+    3: "Surface treatment / Overlay (localized)",
+    4: "Major rehabilitation / Reconstruction assessment",
+}
+
+# IRI condition bands — Lookup!L:O (rank 1 = best ... 4 = worst)
+IRI_RANK_LABEL = {1: "Very Good (Smooth)", 2: "Good", 3: "Fair", 4: "Poor (Rough)"}
+IRI_RANK_RECO = {
+    1: "Routine maintenance",
+    2: "Preventive maintenance (localized patching/leveling)",
+    3: "Surface treatment / thin overlay",
+    4: "Structural overlay / rehabilitation",
+}
+
+CONDITION_COLORS = {
+    "Very Good": "#2E7D32",
+    "Very Good (Smooth)": "#2E7D32",
+    "Good": "#1976D2",
+    "Good / Satisfactory": "#1976D2",
+    "Fair": "#F9A825",
+    "Poor": "#C62828",
+    "Poor (Rough)": "#C62828",
+}
+RANK_COLOR = {1: "#2E7D32", 2: "#1976D2", 3: "#F9A825", 4: "#C62828"}
+
+# Supplementary, defect-level treatment guide.
+# NOTE / ASSUMPTION: the lecturer's spreadsheet only issues a maintenance
+# recommendation at the SECTION level (based on PCI/IRI classification).
+# It does not provide a per-defect-type x severity action table. The table
+# below is added as general pavement-maintenance practice guidance (common,
+# non-proprietary treatments) so that the tool can also recommend an action
+# "for each defect" as requested. It is clearly separated from the official
+# section-level recommendation in every table/report this app produces.
+DEFECT_TREATMENT_GUIDE = {
+    "Longitudinal Crack": {
+        "Low": "Monitor; seal during routine maintenance",
+        "Medium": "Crack sealing",
+        "High": "Crack sealing + localized patching",
+    },
+    "Alligator (Fatigue) Crack": {
+        "Low": "Monitor / crack sealing",
+        "Medium": "Partial-depth patching",
+        "High": "Full-depth patching or overlay (structural distress)",
+    },
+    "Potholes": {
+        "Low": "Patch at next routine maintenance round",
+        "Medium": "Patch promptly",
+        "High": "Immediate patching — safety hazard",
+    },
+    "Raveling": {
+        "Low": "Monitor / fog seal",
+        "Medium": "Surface (chip/slurry) seal",
+        "High": "Thin overlay",
+    },
+    "Depression/Sag": {
+        "Low": "Monitor drainage and surface",
+        "Medium": "Localized levelling / patching",
+        "High": "Investigate sub-base; structural repair",
+    },
+    "Patching (Failed)": {
+        "Low": "Reseal patch edges",
+        "Medium": "Remove and re-patch",
+        "High": "Full-depth repair of patch area",
+    },
+    "Bleeding/Flushing": {
+        "Low": "Apply sand/blotter material",
+        "Medium": "Surface treatment",
+        "High": "Overlay (loss of skid resistance)",
+    },
+    "Rut/Rutting": {
+        "Low": "Monitor",
+        "Medium": "Milling and overlay",
+        "High": "Structural overlay / reconstruction",
+    },
+}
+DEFAULT_TREATMENT = "Inspect on-site and patch/repair as needed (defect type not in guide)"
+
+CANONICAL_COLS = ["Section", "Defect Type", "Severity", "Area Percentage (%)", "IRI"]
+
+# Map of common header variants -> canonical column name
+COLUMN_ALIASES = {
+    "section": "Section", "section id": "Section", "sectionid": "Section",
+    "section_id": "Section", "road section": "Section",
+    "defect type": "Defect Type", "defect": "Defect Type", "defecttype": "Defect Type",
+    "distress type": "Defect Type", "distress": "Defect Type",
+    "severity": "Severity", "severity level": "Severity",
+    "area percentage (%)": "Area Percentage (%)", "area percentage": "Area Percentage (%)",
+    "area (%)": "Area Percentage (%)", "area affected (%)": "Area Percentage (%)",
+    "area affected": "Area Percentage (%)", "area%": "Area Percentage (%)",
+    "area_pct": "Area Percentage (%)", "area": "Area Percentage (%)",
+    "iri": "IRI", "iri (m/km)": "IRI", "avg iri": "IRI", "average iri": "IRI",
+    "iri(m/km)": "IRI", "roughness": "IRI",
+}
+
+
+# -----------------------------------------------------------------------------
+# HELPER FUNCTIONS — DATA / PARSING / COMPUTATION
+# (Unchanged from the previous version; this is the tested, verified engine.)
+# -----------------------------------------------------------------------------
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename columns to the canonical set using a case/space-insensitive match."""
+    rename_map = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        if key in COLUMN_ALIASES:
+            rename_map[col] = COLUMN_ALIASES[key]
+        elif str(col).strip() in CANONICAL_COLS:
+            rename_map[col] = str(col).strip()
+    return df.rename(columns=rename_map)
+
+
+def pci_rank(pci: float) -> int:
+    if pci >= 85:
+        return 1
+    if pci >= 70:
+        return 2
+    if pci >= 55:
+        return 3
+    return 4
+
+
+def iri_rank(iri: float) -> int:
+    if iri < 2:
+        return 1
+    if iri < 3:
+        return 2
+    if iri < 4:
+        return 3
+    return 4
+
+
+def lookup_weight(defect_type, flags):
+    key = str(defect_type).strip()
+    for k, v in DEFECT_WEIGHTS.items():
+        if k.lower() == key.lower():
+            return v
+    flags.append(f"Unrecognised defect type '{defect_type}' — default weighting {DEFAULT_WEIGHT} applied")
+    return DEFAULT_WEIGHT
+
+
+def lookup_severity(severity, flags):
+    key = str(severity).strip()
+    for k, v in SEVERITY_FACTORS.items():
+        if k.lower() == key.lower():
+            return v
+    flags.append(f"Unrecognised severity '{severity}' — default factor {DEFAULT_SEVERITY_FACTOR} (Medium) applied")
+    return DEFAULT_SEVERITY_FACTOR
+
+
+def lookup_treatment(defect_type, severity):
+    for k, v in DEFECT_TREATMENT_GUIDE.items():
+        if k.lower() == str(defect_type).strip().lower():
+            for sk, sv in v.items():
+                if sk.lower() == str(severity).strip().lower():
+                    return sv
+            return DEFAULT_TREATMENT
+    return DEFAULT_TREATMENT
+
+
+@st.cache_data
+def generate_sample_data() -> pd.DataFrame:
+    """Built-in dataset extracted directly from the student's own completed
+    workbook (`TCG633_PCI_IRI_Pro_v2_completed.xlsx` — PCI_Input + IRI_Input
+    sheets, Sections 1-10). IRI is the average of that section's 10 roughness
+    segments from IRI_Input. This lets "Load Sample Data" work immediately
+    even on a server where Excel upload is broken (no openpyxl needed),
+    while still showing the assignment's actual dataset rather than a
+    generic placeholder."""
+    rows = [
+        # Section, Defect Type, Severity, Area %, IRI (m/km, avg of 10 segments)
+        ("S1", "Longitudinal Crack", "Low", 5, 1.60),
+        ("S2", "Potholes", "Medium", 3, 1.91),
+        ("S3", "Raveling", "Low", 10, 2.21),
+        ("S4", "Alligator (Fatigue) Crack", "Medium", 6, 2.51),
+        ("S5", "Depression/Sag", "Low", 4, 2.01),
+        ("S6", "Patching (Failed)", "High", 2, 2.81),
+        ("S7", "Alligator (Fatigue) Crack", "High", 10, 3.31),
+        ("S8", "Potholes", "High", 11, 3.81),
+        ("S9", "Patching (Failed)", "High", 20, 4.51),
+        ("S10", "Rut/Rutting", "High", 30, 5.51),
+    ]
+    return pd.DataFrame(rows, columns=CANONICAL_COLS)
+
+
+def _is_lecturer_template(wb) -> bool:
+    """Return True if this workbook is the lecturer's TCG633 template format
+    (has both PCI_Input and IRI_Input sheets)."""
+    return "PCI_Input" in wb.sheetnames and "IRI_Input" in wb.sheetnames
+
+
+def _parse_lecturer_template(wb) -> pd.DataFrame:
+    """Parse the lecturer's TCG633_PCI_IRI_Pro workbook format.
+
+    PCI_Input  — header on row 6, data from row 7.
+                 Columns: Section ID | Defect Type | Severity | Area Affected (%) | Notes
+                 Only rows where *all* of Defect Type, Severity AND Area Affected are
+                 non-null are considered actual defect records.
+
+    IRI_Input  — header on row 6, data from row 7.
+                 Columns: Section ID | Segment ID | Start | End | IRI (m/km) | Notes
+                 IRI values are averaged per Section to produce one IRI value per section.
+
+    Both sheets are merged on Section ID into the flat 5-column format the
+    computation engine expects: Section, Defect Type, Severity, Area Percentage (%), IRI.
+    """
+    # ---------- PCI_Input ----------
+    ws_pci = wb["PCI_Input"]
+    pci_rows = []
+    for row in ws_pci.iter_rows(min_row=7, values_only=True):
+        sec_id, defect, severity, area, *_ = row + (None,) * 5
+        if sec_id is None:
+            continue
+        if defect is None or severity is None or area is None:
+            continue  # skip placeholder / empty rows
+        pci_rows.append({
+            "Section": f"S{int(sec_id)}" if isinstance(sec_id, (int, float)) else str(sec_id).strip(),
+            "Defect Type": str(defect).strip(),
+            "Severity": str(severity).strip(),
+            "Area Percentage (%)": float(area),
+        })
+    pci_df = pd.DataFrame(pci_rows) if pci_rows else pd.DataFrame(
+        columns=["Section", "Defect Type", "Severity", "Area Percentage (%)"]
     )
 
-# --------------------------------------------------------------------------------------
-# Upload existing Excel  /  Export current data
-# --------------------------------------------------------------------------------------
-st.markdown("## 📁 Upload Existing Pavement Excel")
-up_col1, up_col2 = st.columns([3, 1])
-with up_col1:
-    upload = st.file_uploader("Upload Excel exported from this system", type=["xlsx", "csv"],
-                               label_visibility="collapsed")
-    if upload is not None:
+    # ---------- IRI_Input ----------
+    ws_iri = wb["IRI_Input"]
+    iri_rows = []
+    for row in ws_iri.iter_rows(min_row=7, values_only=True):
+        sec_id = row[0]
+        iri_val = row[4] if len(row) > 4 else None
+        if sec_id is None or iri_val is None:
+            continue
         try:
-            new_df = pd.read_excel(upload) if upload.name.endswith("xlsx") else pd.read_csv(upload)
-            required = {"Section ID", "Defect Type", "Severity", "Area Affected (%)", "IRI (m/km)"}
-            if not required.issubset(new_df.columns):
-                st.error(f"File must contain columns: {', '.join(sorted(required))}")
-            else:
-                by_id = {r["Section ID"]: r for r in st.session_state.records}
-                for _, row in new_df.iterrows():
-                    rec = {k: row[k] for k in required}
-                    by_id[rec["Section ID"]] = rec
-                st.session_state.records = list(by_id.values())
-                st.session_state.last_section = new_df.iloc[-1]["Section ID"]
-                st.success(f"Imported {len(new_df)} section(s).")
-                st.rerun()
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-with up_col2:
-    df_export = compute_all(st.session_state.records, pci_weight)
+            iri_val = float(iri_val)
+        except (TypeError, ValueError):
+            continue
+        sec_label = f"S{int(sec_id)}" if isinstance(sec_id, (int, float)) else str(sec_id).strip()
+        iri_rows.append({"Section": sec_label, "IRI": iri_val})
+    iri_df = pd.DataFrame(iri_rows) if iri_rows else pd.DataFrame(columns=["Section", "IRI"])
+    avg_iri = iri_df.groupby("Section")["IRI"].mean().reset_index() if not iri_df.empty else pd.DataFrame(columns=["Section", "IRI"])
+
+    # ---------- Merge ----------
+    all_sections = sorted(
+        set(pci_df["Section"].tolist()) | set(avg_iri["Section"].tolist()),
+        key=lambda x: (len(x), x)
+    )
+    merged_rows = []
+    for sec in all_sections:
+        sec_pci = pci_df[pci_df["Section"] == sec]
+        iri_val = avg_iri.loc[avg_iri["Section"] == sec, "IRI"].values
+        iri_val = float(iri_val[0]) if len(iri_val) > 0 else np.nan
+        if not sec_pci.empty:
+            for _, r in sec_pci.iterrows():
+                merged_rows.append({
+                    "Section": sec,
+                    "Defect Type": r["Defect Type"],
+                    "Severity": r["Severity"],
+                    "Area Percentage (%)": r["Area Percentage (%)"],
+                    "IRI": iri_val,
+                })
+        else:
+            # IRI-only section
+            merged_rows.append({
+                "Section": sec,
+                "Defect Type": np.nan,
+                "Severity": np.nan,
+                "Area Percentage (%)": np.nan,
+                "IRI": iri_val,
+            })
+    return pd.DataFrame(merged_rows, columns=CANONICAL_COLS)
+
+
+def read_uploaded_file(uploaded_file) -> pd.DataFrame:
+    """Smart parser that handles:
+    1. CSV files (any flat layout) — no openpyxl needed.
+    2. The lecturer's TCG633 multi-sheet Excel template (PCI_Input + IRI_Input sheets).
+    3. Any generic flat Excel file with the 5-column layout.
+    """
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+        return normalize_columns(df)
+
+    # Excel path — needs openpyxl
+    if not OPENPYXL_OK:
+        raise RuntimeError(
+            "This server's Python environment is missing the 'openpyxl' package, "
+            "so Excel (.xlsx/.xls) files can't be read right now. "
+            "Workaround: open this file in Excel/Google Sheets and re-save/export it "
+            "as .csv, then upload the .csv instead — CSV upload does not need openpyxl."
+        )
+
+    import openpyxl as _openpyxl
+    # Read bytes once so we can open with openpyxl AND pandas without seeking issues
+    raw_bytes = uploaded_file.read()
+    wb = _openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
+
+    if _is_lecturer_template(wb):
+        return _parse_lecturer_template(wb)
+
+    # Generic flat Excel — try first sheet
+    df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=0)
+    return normalize_columns(df)
+
+
+@st.cache_data(show_spinner=False)
+def compute_results(df: pd.DataFrame):
+    """Core engine: replicates PCI_Compute / IRI_Compute / Settings_Summary
+    logic from the lecturer's Excel model. Returns (detail_df, summary_df, flags).
+    Cached on the exact input dataframe so re-visiting a page after switching
+    elsewhere doesn't recompute from scratch."""
+    flags = []
+    df = df.copy()
+
+    for c in CANONICAL_COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+
+    df["Section"] = df["Section"].astype(str).str.strip()
+    df = df[df["Section"].notna() & (df["Section"] != "") & (df["Section"].str.lower() != "nan")]
+
+    df["Area Percentage (%)"] = pd.to_numeric(df["Area Percentage (%)"], errors="coerce")
+    df["IRI"] = pd.to_numeric(df["IRI"], errors="coerce")
+
+    defect_mask = (
+        df["Defect Type"].notna()
+        & df["Severity"].notna()
+        & df["Area Percentage (%)"].notna()
+    )
+    detail = df[defect_mask].copy()
+
+    if not detail.empty:
+        detail["Weighting Factor"] = detail["Defect Type"].apply(lambda d: lookup_weight(d, flags))
+        detail["Severity Factor"] = detail["Severity"].apply(lambda s: lookup_severity(s, flags))
+        detail["Deduct Value"] = (
+            detail["Area Percentage (%)"] * detail["Severity Factor"] * detail["Weighting Factor"]
+        )
+        detail["Suggested Defect Treatment"] = detail.apply(
+            lambda r: lookup_treatment(r["Defect Type"], r["Severity"]), axis=1
+        )
+    else:
+        for c in ["Weighting Factor", "Severity Factor", "Deduct Value", "Suggested Defect Treatment"]:
+            detail[c] = np.nan
+
+    all_sections = pd.Index(sorted(df["Section"].unique(), key=lambda x: (len(x), x)))
+
+    sum_deduct = detail.groupby("Section")["Deduct Value"].sum() if not detail.empty else pd.Series(dtype=float)
+    defect_count = detail.groupby("Section").size() if not detail.empty else pd.Series(dtype=int)
+    avg_iri = df[df["IRI"].notna()].groupby("Section")["IRI"].mean()
+
+    rows = []
+    for sec in all_sections:
+        has_pci = sec in sum_deduct.index
+        has_iri = sec in avg_iri.index
+
+        pci_val = max(0.0, 100.0 - min(100.0, sum_deduct.get(sec, 0.0))) if has_pci else np.nan
+        iri_val = float(avg_iri.get(sec)) if has_iri else np.nan
+
+        r_pci = pci_rank(pci_val) if has_pci else None
+        r_iri = iri_rank(iri_val) if has_iri else None
+
+        if has_pci and has_iri:
+            combined_rank = max(r_pci, r_iri)
+            combined_label = PCI_RANK_LABEL[combined_rank]
+            combined_reco = PCI_RANK_RECO[combined_rank]
+            basis = "Hybrid (PCI & IRI — worse of the two governs)"
+        elif has_pci:
+            combined_rank = r_pci
+            combined_label = PCI_RANK_LABEL[combined_rank]
+            combined_reco = PCI_RANK_RECO[combined_rank]
+            basis = "PCI only (no IRI data)"
+        elif has_iri:
+            combined_rank = r_iri
+            combined_label = IRI_RANK_LABEL[combined_rank]
+            combined_reco = IRI_RANK_RECO[combined_rank]
+            basis = "IRI only (no defect data)"
+        else:
+            combined_rank, combined_label, combined_reco, basis = None, "No Data", "—", "No data"
+
+        rows.append({
+            "Section": sec,
+            "No. of Defects Recorded": int(defect_count.get(sec, 0)),
+            "Sum Deduct Value": round(sum_deduct.get(sec, np.nan), 2) if has_pci else np.nan,
+            "PCI": round(pci_val, 1) if has_pci else np.nan,
+            "PCI Condition": PCI_RANK_LABEL[r_pci] if has_pci else "—",
+            "Avg IRI (m/km)": round(iri_val, 2) if has_iri else np.nan,
+            "IRI Condition": IRI_RANK_LABEL[r_iri] if has_iri else "—",
+            "Combined Condition Rating": combined_label,
+            "_rank": combined_rank,
+            "Maintenance Recommendation": combined_reco,
+            "Basis": basis,
+        })
+
+    summary = pd.DataFrame(rows)
+    return detail, summary, flags
+
+
+def df_to_excel_bytes(sheets: dict) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df_export.drop(columns=["Condition Color"]).to_excel(writer, sheet_name="Sections", index=False)
-    st.write("")
-    st.download_button("⬇️ Export Data (Excel)", data=buf.getvalue(),
-                        file_name="pavement_sections.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        width='stretch')
+        for name, d in sheets.items():
+            d.to_excel(writer, sheet_name=name[:31], index=False)
+    return buf.getvalue()
 
-# --------------------------------------------------------------------------------------
-# Add / update a section
-# --------------------------------------------------------------------------------------
-st.markdown("## 🚧 Add New Pavement Section")
-with st.form("add_section_form", clear_on_submit=False):
-    c1, c2 = st.columns(2)
+
+def condition_badge(label: str) -> str:
+    color = CONDITION_COLORS.get(label, "#777")
+    return f'<span class="badge" style="background:{color}">{label}</span>'
+
+
+# -----------------------------------------------------------------------------
+# BONUS FEATURE 1 — HYBRID INDEX (numeric PCI + IRI blend, 0-100 scale)
+# -----------------------------------------------------------------------------
+# NOTE: this is an ADDITIONAL, OPTIONAL bonus feature on top of the official
+# section-level "Combined Condition Rating" computed above (which follows the
+# lecturer's "worse of PCI/IRI governs" rule and is what the rest of the app
+# uses by default). The Hybrid Index instead produces one continuous 0-100
+# NUMBER per section by rescaling IRI onto the same 0-100 scale PCI already
+# uses (anchored at the identical classification boundaries: 85/70/55), then
+# blending the two with a user-adjustable weight. This satisfies the
+# "combine PCI & IRI into a hybrid index" bonus request from the project
+# brief, while keeping the official rating untouched and clearly labelled
+# elsewhere in the app.
+IRI_SCORE_ANCHORS = [  # (IRI m/km, equivalent 0-100 score) — monotonic, decreasing score
+    (0.0, 100.0),
+    (2.0, 85.0),
+    (3.0, 70.0),
+    (4.0, 55.0),
+    (6.0, 0.0),
+]
+
+
+def iri_to_score(iri: float) -> float:
+    """Piecewise-linear rescale of IRI (m/km, lower = better) onto a 0-100
+    score using the SAME boundary values as the PCI classification bands
+    (85 / 70 / 55), so a weighted blend with PCI is meaningful. Values above
+    6 m/km clamp to 0; values below 0 clamp to 100 (shouldn't occur)."""
+    if pd.isna(iri):
+        return np.nan
+    if iri <= IRI_SCORE_ANCHORS[0][0]:
+        return IRI_SCORE_ANCHORS[0][1]
+    if iri >= IRI_SCORE_ANCHORS[-1][0]:
+        return IRI_SCORE_ANCHORS[-1][1]
+    for (x0, y0), (x1, y1) in zip(IRI_SCORE_ANCHORS, IRI_SCORE_ANCHORS[1:]):
+        if x0 <= iri <= x1:
+            frac = (iri - x0) / (x1 - x0)
+            return y0 + frac * (y1 - y0)
+    return np.nan
+
+
+def compute_hybrid_index(summary_df: pd.DataFrame, w_pci: float) -> pd.DataFrame:
+    """Add 'IRI Score (0-100)', 'Hybrid Index', and 'Hybrid Condition' columns.
+    w_pci is the weight given to PCI (0.0-1.0); IRI gets (1 - w_pci)."""
+    out = summary_df.copy()
+    out["IRI Score (0-100)"] = out["Avg IRI (m/km)"].apply(iri_to_score)
+
+    def blend(row):
+        has_pci = pd.notna(row["PCI"])
+        has_iri = pd.notna(row["IRI Score (0-100)"])
+        if has_pci and has_iri:
+            return w_pci * row["PCI"] + (1 - w_pci) * row["IRI Score (0-100)"]
+        if has_pci:
+            return row["PCI"]
+        if has_iri:
+            return row["IRI Score (0-100)"]
+        return np.nan
+
+    out["Hybrid Index"] = out.apply(blend, axis=1).round(1)
+    out["Hybrid Condition"] = out["Hybrid Index"].apply(
+        lambda v: PCI_RANK_LABEL[pci_rank(v)] if pd.notna(v) else "—"
+    )
+    return out
+
+
+# -----------------------------------------------------------------------------
+# BONUS FEATURE 2 — GIS MAPPING (simulated coordinates, native st.map)
+# -----------------------------------------------------------------------------
+# NOTE: the uploaded dataset has no real GPS coordinates (the project brief's
+# Section/Defect/Severity/Area/IRI columns don't include location data), so
+# this generates SIMULATED, illustrative coordinates by walking a straight
+# line of N x 100m sections from a user-chosen start point and bearing. This
+# is clearly labelled as simulated everywhere it appears. Uses Streamlit's
+# native st.map (pydeck-backed) — no extra geo libraries required, so this
+# stays robust against the dependency/deployment issues seen earlier.
+EARTH_RADIUS_M = 6371000.0
+
+
+def simulate_section_coords(sections: list, start_lat: float, start_lon: float,
+                             bearing_deg: float, spacing_m: float) -> pd.DataFrame:
+    bearing_rad = math.radians(bearing_deg)
+    rows = []
+    lat0_rad = math.radians(start_lat)
+    for i, sec in enumerate(sections):
+        dist = spacing_m * i
+        dlat = (dist * math.cos(bearing_rad)) / EARTH_RADIUS_M
+        dlon = (dist * math.sin(bearing_rad)) / (EARTH_RADIUS_M * math.cos(lat0_rad))
+        lat = start_lat + math.degrees(dlat)
+        lon = start_lon + math.degrees(dlon)
+        rows.append({"Section": sec, "lat": lat, "lon": lon})
+    return pd.DataFrame(rows)
+
+
+# -----------------------------------------------------------------------------
+# BONUS FEATURE 3 — AUTOMATED REPORT GENERATION (self-contained HTML)
+# -----------------------------------------------------------------------------
+# NOTE: deliberately built with ZERO new pip dependencies (no reportlab/fpdf/
+# weasyprint) given how much trouble missing packages have already caused on
+# Streamlit Cloud in this project. The report is a single self-contained
+# .html file (tables + small hand-built inline SVG bar charts) that opens in
+# any browser and can be turned into a PDF via the browser's native
+# "Print > Save as PDF" — no server-side PDF engine required.
+def _svg_bar_chart(labels, values, colors, title, width=640, height=260, value_fmt="{:.1f}"):
+    """Tiny, dependency-free inline SVG bar chart generator for the report."""
+    n = len(labels)
+    if n == 0:
+        return f"<p><em>No data for {title}.</em></p>"
+    pad_l, pad_r, pad_t, pad_b = 40, 20, 30, 50
+    chart_w = width - pad_l - pad_r
+    chart_h = height - pad_t - pad_b
+    max_val = max([v for v in values if pd.notna(v)] or [1]) * 1.15 or 1
+    bar_w = chart_w / n * 0.6
+    gap = chart_w / n
+
+    bars = []
+    for i, (lab, val, col) in enumerate(zip(labels, values, colors)):
+        if pd.isna(val):
+            continue
+        bh = (val / max_val) * chart_h
+        x = pad_l + i * gap + (gap - bar_w) / 2
+        y = pad_t + (chart_h - bh)
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" '
+            f'fill="{col}" rx="3" />'
+            f'<text x="{x + bar_w/2:.1f}" y="{y - 5:.1f}" font-size="11" '
+            f'text-anchor="middle" fill="#333">{value_fmt.format(val)}</text>'
+            f'<text x="{x + bar_w/2:.1f}" y="{pad_t + chart_h + 16:.1f}" font-size="10" '
+            f'text-anchor="middle" fill="#555">{lab}</text>'
+        )
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px">'
+        f'<line x1="{pad_l}" y1="{pad_t + chart_h}" x2="{pad_l + chart_w}" y2="{pad_t + chart_h}" '
+        f'stroke="#ccc" stroke-width="1"/>'
+        f'<text x="{pad_l}" y="18" font-size="13" font-weight="600" fill="#222">{title}</text>'
+        + "".join(bars) +
+        "</svg>"
+    )
+    return svg
+
+
+def build_html_report(summary_df, detail_df, data_source, calc_flags, hybrid_df=None) -> str:
+    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    display_summary = summary_df.drop(columns=["_rank"], errors="ignore")
+
+    avg_pci = summary_df["PCI"].mean()
+    avg_iri = summary_df["Avg IRI (m/km)"].mean()
+    poor_n = int(summary_df["Combined Condition Rating"].isin(["Poor", "Poor (Rough)"]).sum())
+    total_n = len(summary_df)
+
+    pci_chart = _svg_bar_chart(
+        list(summary_df["Section"]), list(summary_df["PCI"]),
+        [CONDITION_COLORS.get(c, "#999") for c in summary_df["PCI Condition"]],
+        "PCI by Section",
+    )
+    iri_chart = _svg_bar_chart(
+        list(summary_df["Section"]), list(summary_df["Avg IRI (m/km)"]),
+        [CONDITION_COLORS.get(c, "#999") for c in summary_df["IRI Condition"]],
+        "Average IRI by Section (m/km)", value_fmt="{:.2f}",
+    )
+
+    hybrid_section = ""
+    if hybrid_df is not None and not hybrid_df.empty:
+        hybrid_chart = _svg_bar_chart(
+            list(hybrid_df["Section"]), list(hybrid_df["Hybrid Index"]),
+            [CONDITION_COLORS.get(c, "#999") for c in hybrid_df["Hybrid Condition"]],
+            "Hybrid Index by Section",
+        )
+        hybrid_table = hybrid_df[["Section", "PCI", "IRI Score (0-100)", "Hybrid Index", "Hybrid Condition"]].to_html(
+            index=False, classes="datatable", border=0
+        )
+        hybrid_section = f"""
+        <h2>5. Hybrid Index (Bonus)</h2>
+        <p>An additional numeric PCI+IRI blend on a 0-100 scale (see Methodology page for the formula).
+        This supplements — and does not replace — the official Combined Condition Rating above.</p>
+        {hybrid_chart}
+        {hybrid_table}
+        """
+
+    flags_html = ""
+    if calc_flags:
+        flags_html = "<h2>6. Data-Quality Flags</h2><ul>" + "".join(
+            f"<li>{f}</li>" for f in sorted(set(calc_flags))
+        ) + "</ul>"
+
+    detail_table_html = ""
+    if detail_df is not None and not detail_df.empty:
+        detail_cols = ["Section", "Defect Type", "Severity", "Area Percentage (%)",
+                        "Weighting Factor", "Severity Factor", "Deduct Value",
+                        "Suggested Defect Treatment"]
+        detail_table_html = detail_df[detail_cols].to_html(index=False, classes="datatable", border=0)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pavement Condition Evaluation Report</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: #222;
+          max-width: 900px; margin: 30px auto; padding: 0 20px; line-height: 1.5; }}
+  h1 {{ font-size: 26px; border-bottom: 3px solid #1976D2; padding-bottom: 10px; }}
+  h2 {{ font-size: 18px; color: #1976D2; margin-top: 32px; }}
+  .meta {{ color: #666; font-size: 13px; margin-bottom: 20px; }}
+  .kpi-row {{ display: flex; gap: 14px; flex-wrap: wrap; margin: 18px 0; }}
+  .kpi {{ background: #f5f7fa; border: 1px solid #e0e0e0; border-radius: 8px;
+          padding: 12px 18px; min-width: 140px; }}
+  .kpi .label {{ font-size: 12px; color: #666; }}
+  .kpi .value {{ font-size: 22px; font-weight: 700; color: #1976D2; }}
+  table.datatable {{ border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }}
+  table.datatable th {{ background: #1976D2; color: white; padding: 7px 10px; text-align: left; }}
+  table.datatable td {{ padding: 6px 10px; border-bottom: 1px solid #eee; }}
+  table.datatable tr:nth-child(even) {{ background: #f8fafc; }}
+  .flagbox {{ background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; padding: 10px 14px; }}
+  .footer {{ margin-top: 40px; font-size: 12px; color: #999; border-top: 1px solid #eee; padding-top: 12px; }}
+  @media print {{ body {{ margin: 0; }} }}
+</style>
+</head>
+<body>
+
+<h1>🛣️ Digital Pavement Condition Evaluation Report</h1>
+<div class="meta">
+  TCG633 Bridge &amp; Road Maintenance · UiTM Cawangan Sarawak<br>
+  Generated: {ts_str} &nbsp;|&nbsp; Data source: {data_source or "—"}
+</div>
+
+<h2>1. Summary Dashboard</h2>
+<div class="kpi-row">
+  <div class="kpi"><div class="label">Total Sections</div><div class="value">{total_n}</div></div>
+  <div class="kpi"><div class="label">Average PCI</div><div class="value">{avg_pci:.1f}</div></div>
+  <div class="kpi"><div class="label">Average IRI (m/km)</div><div class="value">{avg_iri:.2f}</div></div>
+  <div class="kpi"><div class="label">Poor Sections</div><div class="value">{poor_n}</div></div>
+</div>
+
+<h2>2. Charts</h2>
+{pci_chart}
+{iri_chart}
+
+<h2>3. Section-Level Summary</h2>
+{display_summary.to_html(index=False, classes="datatable", border=0)}
+
+<h2>4. Defect-Level Detail</h2>
+{detail_table_html or "<p><em>No defect-level data in this dataset.</em></p>"}
+
+{hybrid_section}
+
+{flags_html}
+
+<h2>7. Methodology (brief)</h2>
+<p>PCI uses a deduct-value method: <code>Deduct = Area% × Severity Factor × Weighting Factor</code>,
+summed per section, then <code>PCI = MAX(0, 100 − MIN(100, ΣDeduct))</code>. IRI is the
+average of all roughness readings per section. The Combined Condition Rating takes the
+worse of the PCI and IRI classification bands per the lecturer's hybrid rule. Full detail
+is in the app's "Methodology &amp; Assumptions" page.</p>
+
+<div class="footer">
+  Auto-generated by the TCG633 Digital Pavement Condition Evaluation and Maintenance
+  Decision Tool (Streamlit). Tip: use your browser's Print → Save as PDF to get a PDF copy
+  of this report.
+</div>
+
+</body>
+</html>"""
+    return html
+
+
+# -----------------------------------------------------------------------------
+# LIGHT CUSTOM STYLING
+# -----------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    .main > div {padding-top: 1.0rem;}
+    .kpi-box {
+        background: #ffffff; border: 1px solid #e6e6e6; border-radius: 10px;
+        padding: 14px 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    .small-note {color:#666; font-size:0.85rem;}
+    .badge {
+        display:inline-block; padding:3px 10px; border-radius:14px;
+        color:white; font-size:0.78rem; font-weight:600;
+    }
+    [data-testid="stMetric"] {
+        background: #ffffff; border: 1px solid #ececec; border-radius: 10px;
+        padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    section[data-testid="stSidebar"] {
+        border-right: 1px solid #eee;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =============================================================================
+# PAGE FUNCTIONS
+# Each function below is one entry in the sidebar navigation. Streamlit's
+# st.navigation/st.Page only executes the SELECTED page's function on each
+# rerun — this is the main reason the app should feel noticeably snappier
+# than the previous st.tabs version, especially the Charts/GIS/Report pages
+# which do the most work.
+# =============================================================================
+
+def page_how_to_use():
+    st.subheader("How to Use This Tool")
+    st.markdown(
+        """
+**1. Prepare your data.**  Build a spreadsheet/CSV with one row per observed
+defect (or per IRI sample) using these columns:
+
+| Section | Defect Type | Severity | Area Percentage (%) | IRI |
+|---|---|---|---|---|
+| S1 | Potholes | High | 6 | 3.8 |
+| S1 | Raveling | Low | 10 | 3.8 |
+| S2 | Longitudinal Crack | Low | 4 | 1.9 |
+
+- One **Section** can repeat across several rows — one row per defect found in that section.
+- **Severity** must be `Low`, `Medium`, or `High`.
+- **Area Percentage (%)** is the percentage of the sample area affected by that defect.
+- **IRI** (m/km) can repeat on every row of a section, or be supplied once — the
+  tool averages whatever IRI values it finds for that section.
+- You only need defect columns **or** IRI — the tool computes PCI-only,
+  IRI-only, or a combined rating depending on what's available.
+- The lecturer's own multi-sheet `TCG633_PCI_IRI_Pro` Excel template is also
+  supported directly — just upload it as-is, no reformatting needed.
+
+**2. Upload the file** using the **Data Input** panel on the left, or click
+**Load Built-in Dataset** to try the tool immediately.
+
+**3. Explore the pages** in the sidebar:
+- **Dashboard** — KPI cards and overall network condition.
+- **Detailed Results** — section summary, defect-level computation, downloads.
+- **Charts** — PCI/IRI by section, defect distribution, condition distribution.
+- **Hybrid Index** *(bonus)* — a single 0-100 number blending PCI and IRI with
+  an adjustable weight.
+- **GIS Map** *(bonus)* — a simulated map view of sections coloured by condition.
+- **Report Generator** *(bonus)* — one-click downloadable HTML report
+  (printable to PDF from your browser).
+- **Methodology & Assumptions** — every formula and assumption, for your report.
+        """
+    )
+    st.info(
+        "Tip for your video presentation: walk through Upload → Dashboard → "
+        "Results → Charts → Hybrid Index → GIS Map → Report — covers "
+        "'Demonstration' and 'Results' in Part B in one smooth pass.",
+        icon="🎬",
+    )
+
+
+def page_upload_preview():
+    st.subheader("Upload & Preview")
+    df_raw = st.session_state.get("df_raw")
+    if df_raw is None:
+        st.warning("No data loaded yet. Use the sidebar to upload a file or load the built-in dataset.")
+        return
+    missing = [c for c in CANONICAL_COLS if c not in df_raw.columns]
+    if "Section" in missing:
+        st.error(
+            "Your file must contain a 'Section' column. Detected columns: "
+            + ", ".join(map(str, df_raw.columns))
+        )
+        return
+    if missing:
+        st.warning(
+            f"Columns not found and treated as empty: {', '.join(missing)}. "
+            "The tool will still compute whatever indicator(s) the available data supports."
+        )
+    st.success(f"Data validated — {df_raw['Section'].nunique()} unique section(s), {len(df_raw)} row(s).")
+    st.dataframe(df_raw, use_container_width=True, height=420)
+
+
+def page_dashboard():
+    st.subheader("Summary Dashboard")
+    summary_df = st.session_state.get("_summary_df")
+    calc_flags = st.session_state.get("_calc_flags", [])
+    if summary_df is None or summary_df.empty:
+        st.info("Load data to see the dashboard.")
+        return
+
+    if calc_flags:
+        with st.expander(f"⚠️ {len(calc_flags)} data-quality flag(s) detected — click to view", expanded=False):
+            for f in sorted(set(calc_flags)):
+                st.write("• " + f)
+
+    total_sections = len(summary_df)
+    avg_pci = summary_df["PCI"].mean()
+    avg_iri = summary_df["Avg IRI (m/km)"].mean()
+    poor_sections = int((summary_df["Combined Condition Rating"].isin(["Poor", "Poor (Rough)"])).sum())
+    valid_ranks = summary_df["_rank"].dropna()
+    overall_rank = int(round(valid_ranks.mean())) if not valid_ranks.empty else None
+    overall_label = PCI_RANK_LABEL.get(overall_rank, "No Data") if overall_rank else "No Data"
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        sec_id = st.text_input("Section ID (e.g. S1, S2, S10)", value="S1")
-        defect = st.selectbox("Defect Type", list(DEFECT_WEIGHTS.keys()))
-        severity = st.selectbox("Severity", list(SEVERITY_FACTORS.keys()))
+        st.metric("Total Road Sections", total_sections)
     with c2:
-        area = st.number_input("Area Affected (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5)
-        iri = st.number_input("IRI (m/km)", min_value=0.0, max_value=20.0, value=3.0, step=0.1)
-    bcol1, bcol2 = st.columns([1, 1])
-    submitted = bcol1.form_submit_button("➕ Add Section", width='stretch')
-    reset_clicked = bcol2.form_submit_button("🔄 Reset All Data", width='stretch')
+        st.metric("Average PCI", f"{avg_pci:.1f}" if pd.notna(avg_pci) else "N/A")
+    with c3:
+        st.metric("Average IRI (m/km)", f"{avg_iri:.2f}" if pd.notna(avg_iri) else "N/A")
+    with c4:
+        st.metric("Poor Sections", poor_sections)
+    with c5:
+        st.markdown("**Overall Network Condition**")
+        st.markdown(condition_badge(overall_label), unsafe_allow_html=True)
 
-if submitted:
-    sid = sec_id.strip() or "S1"
-    by_id = {r["Section ID"]: r for r in st.session_state.records}
-    by_id[sid] = {"Section ID": sid, "Defect Type": defect, "Severity": severity,
-                   "Area Affected (%)": area, "IRI (m/km)": iri}
-    st.session_state.records = list(by_id.values())
-    st.session_state.last_section = sid
-    st.success(f"Section {sid} saved.")
-    st.rerun()
+    st.markdown("")
+    colL, colR = st.columns([0.55, 0.45])
+    with colL:
+        st.markdown("##### Section Condition Overview")
+        show_cols = ["Section", "PCI", "PCI Condition", "Avg IRI (m/km)", "IRI Condition",
+                     "Combined Condition Rating", "Maintenance Recommendation"]
+        st.dataframe(summary_df[show_cols], use_container_width=True, height=380)
+    with colR:
+        st.markdown("##### Condition Rating Distribution")
+        dist = summary_df["Combined Condition Rating"].value_counts().reset_index()
+        dist.columns = ["Condition", "Count"]
+        if PLOTLY_OK:
+            fig = px.pie(
+                dist, names="Condition", values="Count", hole=0.45,
+                color="Condition", color_discrete_map=CONDITION_COLORS,
+            )
+            fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=360)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.bar_chart(dist.set_index("Condition")["Count"])
 
-if reset_clicked:
-    st.session_state.records = [dict(r) for r in SEED]
-    st.session_state.last_section = "S1"
-    st.success("All data reset to the sample dataset.")
-    st.rerun()
 
-# --------------------------------------------------------------------------------------
-# Current section result
-# --------------------------------------------------------------------------------------
-results_df = compute_all(st.session_state.records, pci_weight)
+def page_detailed_results():
+    st.subheader("Detailed Results")
+    summary_df = st.session_state.get("_summary_df")
+    detail_df = st.session_state.get("_detail_df")
+    df_raw = st.session_state.get("df_raw")
+    if summary_df is None or summary_df.empty:
+        st.info("Load data to see detailed results.")
+        return
 
-st.markdown("## Current Section Result")
-if st.session_state.last_section in results_df["Section ID"].values:
-    row = results_df[results_df["Section ID"] == st.session_state.last_section].iloc[0]
-else:
-    row = results_df.iloc[0]
+    st.markdown("##### 1. Section-Level Summary (PCI, IRI, Combined Rating, Recommendation)")
+    display_summary = summary_df.drop(columns=["_rank"])
+    st.dataframe(display_summary, use_container_width=True, height=320)
 
-cA, cB = st.columns(2)
-with cA:
-    st.markdown(f'<div class="pms-label">PCI — Section {row["Section ID"]}</div>'
-                f'<div class="pms-bignum">{row["PCI"]:.1f}</div>', unsafe_allow_html=True)
-with cB:
-    st.markdown(f'<div class="pms-label">Hybrid Index</div>'
-                f'<div class="pms-bignum">{row["Hybrid Index"]:.1f}</div>', unsafe_allow_html=True)
+    st.markdown("##### 2. Defect-Level Detail & Computation")
+    if detail_df is None or detail_df.empty:
+        st.info("No defect-level rows found in the uploaded data (Defect Type / Severity / Area % missing).")
+    else:
+        detail_show = detail_df[[
+            "Section", "Defect Type", "Severity", "Area Percentage (%)",
+            "Weighting Factor", "Severity Factor", "Deduct Value", "Suggested Defect Treatment"
+        ]].reset_index(drop=True)
+        st.dataframe(detail_show, use_container_width=True, height=320)
+        st.caption(
+            "Deduct Value = Area (%) × Severity Factor × Weighting Factor. "
+            "'Suggested Defect Treatment' is supplementary general guidance per "
+            "defect (see Methodology page) — the official section rating/recommendation "
+            "is the 'Combined Condition Rating' / 'Maintenance Recommendation' columns above."
+        )
 
-st.markdown(
-    f'<div class="pms-banner">Final Condition: <b>{row["Final Condition"]}</b> '
-    f'&nbsp;|&nbsp; Maintenance: <b>{row["Maintenance Action"]}</b></div>',
-    unsafe_allow_html=True,
+    st.markdown("##### 3. Download Analysed Results")
+    c1, c2 = st.columns(2)
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    with c1:
+        st.download_button(
+            "⬇️ Download Section Summary (CSV)",
+            data=display_summary.to_csv(index=False).encode("utf-8"),
+            file_name=f"pavement_section_summary_{ts}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with c2:
+        if not OPENPYXL_OK:
+            st.button(
+                "⬇️ Download Full Results (Excel) — unavailable",
+                disabled=True, use_container_width=True,
+                help="The 'openpyxl' package isn't available in this server environment right now.",
+            )
+            st.caption(
+                "⚠️ Excel download is temporarily unavailable on this server "
+                "(missing 'openpyxl' package) — use the CSV download on the left instead."
+            )
+        else:
+            try:
+                excel_bytes = df_to_excel_bytes({
+                    "Section_Summary": display_summary,
+                    "Defect_Detail": detail_df if detail_df is not None else pd.DataFrame(),
+                    "Raw_Input": df_raw,
+                })
+                st.download_button(
+                    "⬇️ Download Full Results (Excel, 3 sheets)",
+                    data=excel_bytes,
+                    file_name=f"pavement_analysis_results_{ts}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.caption(f"⚠️ Excel export failed ({e}). Use the CSV download on the left instead.")
+
+    if not OPENPYXL_OK:
+        with st.expander("ℹ️ Why is Excel upload/download unavailable? (click to view)"):
+            st.markdown(
+                "This server's Python environment is missing the **openpyxl** package, "
+                "which both Excel *upload* and Excel *download* depend on. This is almost "
+                "always a deployment/server-side issue, not a problem with your data.\n\n"
+                "**If you're the app owner (Streamlit Community Cloud):** delete the app and "
+                "redeploy it, choosing Python 3.11 or 3.12 in **Advanced settings** before "
+                "clicking Deploy. In the meantime, CSV upload/download both work normally."
+            )
+
+
+def page_charts():
+    st.subheader("Charts")
+    summary_df = st.session_state.get("_summary_df")
+    detail_df = st.session_state.get("_detail_df")
+    if summary_df is None or summary_df.empty:
+        st.info("Load data to see charts.")
+        return
+
+    if not PLOTLY_OK:
+        st.warning(
+            "Plotly isn't installed in this environment, so charts below use "
+            "Streamlit's simplified built-in charts. Add `plotly` to "
+            "requirements.txt and reboot the app for the full interactive charts.",
+            icon="⚠️",
+        )
+
+    st.markdown("##### PCI by Section")
+    pci_chart_df = summary_df.dropna(subset=["PCI"])
+    if pci_chart_df.empty:
+        st.caption("No PCI data available to chart.")
+    elif PLOTLY_OK:
+        fig1 = px.bar(
+            pci_chart_df, x="Section", y="PCI", color="PCI Condition",
+            color_discrete_map=CONDITION_COLORS, text="PCI",
+            category_orders={"Section": list(summary_df["Section"])},
+        )
+        fig1.add_hline(y=85, line_dash="dot", line_color="#2E7D32", annotation_text="Very Good ≥85")
+        fig1.add_hline(y=70, line_dash="dot", line_color="#1976D2", annotation_text="Good ≥70")
+        fig1.add_hline(y=55, line_dash="dot", line_color="#F9A825", annotation_text="Fair ≥55")
+        fig1.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+        fig1.update_layout(yaxis_range=[0, 105], height=380, margin=dict(t=30, b=10))
+        st.plotly_chart(fig1, use_container_width=True)
+    else:
+        st.bar_chart(pci_chart_df.set_index("Section")["PCI"])
+
+    st.markdown("##### IRI by Section")
+    iri_chart_df = summary_df.dropna(subset=["Avg IRI (m/km)"])
+    if iri_chart_df.empty:
+        st.caption("No IRI data available to chart.")
+    elif PLOTLY_OK:
+        fig2 = px.bar(
+            iri_chart_df, x="Section", y="Avg IRI (m/km)", color="IRI Condition",
+            color_discrete_map=CONDITION_COLORS, text="Avg IRI (m/km)",
+            category_orders={"Section": list(summary_df["Section"])},
+        )
+        fig2.add_hline(y=2, line_dash="dot", line_color="#2E7D32", annotation_text="Very Good <2")
+        fig2.add_hline(y=3, line_dash="dot", line_color="#1976D2", annotation_text="Good <3")
+        fig2.add_hline(y=4, line_dash="dot", line_color="#F9A825", annotation_text="Fair <4")
+        fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig2.update_layout(height=380, margin=dict(t=30, b=10))
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.bar_chart(iri_chart_df.set_index("Section")["Avg IRI (m/km)"])
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("##### Defect Type Distribution")
+        if detail_df is None or detail_df.empty:
+            st.caption("No defect-level data available to chart.")
+        else:
+            defect_counts = detail_df.groupby(["Defect Type", "Severity"]).size().reset_index(name="Count")
+            if PLOTLY_OK:
+                fig3 = px.bar(
+                    defect_counts, x="Defect Type", y="Count", color="Severity",
+                    color_discrete_map={"Low": "#2E7D32", "Medium": "#F9A825", "High": "#C62828"},
+                    barmode="stack",
+                )
+                fig3.update_layout(height=380, margin=dict(t=10, b=10), xaxis_tickangle=-30)
+                st.plotly_chart(fig3, use_container_width=True)
+            else:
+                pivot = defect_counts.pivot_table(index="Defect Type", columns="Severity", values="Count", fill_value=0)
+                st.bar_chart(pivot)
+
+    with colB:
+        st.markdown("##### Condition Rating Distribution")
+        dist2 = summary_df["Combined Condition Rating"].value_counts().reset_index()
+        dist2.columns = ["Condition", "Count"]
+        if PLOTLY_OK:
+            fig4 = px.bar(
+                dist2, x="Condition", y="Count", color="Condition",
+                color_discrete_map=CONDITION_COLORS, text="Count",
+            )
+            fig4.update_layout(height=380, margin=dict(t=10, b=10), showlegend=False)
+            st.plotly_chart(fig4, use_container_width=True)
+        else:
+            st.bar_chart(dist2.set_index("Condition")["Count"])
+
+    st.markdown("##### Defects by Section (stacked)")
+    if detail_df is None or detail_df.empty:
+        st.caption("No defect-level data available to chart.")
+    elif PLOTLY_OK:
+        by_section = detail_df.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
+        fig5 = px.bar(
+            by_section, x="Section", y="Count", color="Defect Type", barmode="stack",
+            category_orders={"Section": list(summary_df["Section"])},
+        )
+        fig5.update_layout(height=380, margin=dict(t=10, b=10))
+        st.plotly_chart(fig5, use_container_width=True)
+    else:
+        by_section = detail_df.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
+        pivot2 = by_section.pivot_table(index="Section", columns="Defect Type", values="Count", fill_value=0)
+        st.bar_chart(pivot2)
+
+
+def page_hybrid_index():
+    st.subheader("🧮 Hybrid Index (Bonus)")
+    summary_df = st.session_state.get("_summary_df")
+    if summary_df is None or summary_df.empty:
+        st.info("Load data to compute a hybrid index.")
+        return
+
+    st.markdown(
+        "This combines PCI and IRI into a **single 0-100 number per section**, "
+        "in addition to (not replacing) the official Combined Condition Rating "
+        "used elsewhere in the app. IRI is rescaled onto the same 0-100 scale "
+        "as PCI using the identical classification boundaries (85/70/55), then "
+        "blended with PCI using the weight you choose below."
+    )
+
+    w_pci_pct = st.slider(
+        "Weight given to PCI (remaining weight goes to IRI)",
+        min_value=0, max_value=100, value=60, step=5, format="%d%%",
+        key="hybrid_w_pci",
+    )
+    w_pci = w_pci_pct / 100.0
+    st.caption(f"Current blend: **{w_pci_pct}% PCI + {100 - w_pci_pct}% IRI**")
+
+    hybrid_df = compute_hybrid_index(summary_df, w_pci)
+    st.session_state["_hybrid_df"] = hybrid_df  # cache for Report page
+
+    show_cols = ["Section", "PCI", "Avg IRI (m/km)", "IRI Score (0-100)", "Hybrid Index", "Hybrid Condition"]
+    st.dataframe(hybrid_df[show_cols], use_container_width=True, height=340)
+
+    st.markdown("##### Hybrid Index by Section")
+    chart_df = hybrid_df.dropna(subset=["Hybrid Index"])
+    if chart_df.empty:
+        st.caption("No data to chart.")
+    elif PLOTLY_OK:
+        fig = px.bar(
+            chart_df, x="Section", y="Hybrid Index", color="Hybrid Condition",
+            color_discrete_map=CONDITION_COLORS, text="Hybrid Index",
+            category_orders={"Section": list(summary_df["Section"])},
+        )
+        fig.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+        fig.update_layout(yaxis_range=[0, 105], height=380, margin=dict(t=20, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.bar_chart(chart_df.set_index("Section")["Hybrid Index"])
+
+    csv_bytes = hybrid_df[show_cols].to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Download Hybrid Index (CSV)",
+        data=csv_bytes,
+        file_name=f"hybrid_index_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )
+
+
+def page_gis_map():
+    st.subheader("🗺️ GIS Map (Bonus — Simulated)")
+    summary_df = st.session_state.get("_summary_df")
+    if summary_df is None or summary_df.empty:
+        st.info("Load data to see the map.")
+        return
+
+    st.warning(
+        "Your dataset has no real GPS coordinates, so the positions below are "
+        "**simulated** — sections are plotted along a straight illustrative "
+        "route, spaced out using the settings you choose. Use this to "
+        "demonstrate a GIS-style view; replace with real survey coordinates "
+        "for actual asset-management use.",
+        icon="🗺️",
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        start_lat = st.number_input("Start latitude", value=1.4655, format="%.4f", key="gis_lat")
+    with c2:
+        start_lon = st.number_input("Start longitude", value=110.4538, format="%.4f", key="gis_lon")
+    with c3:
+        bearing = st.slider("Road direction (° from North)", 0, 359, 90, key="gis_bearing")
+    with c4:
+        spacing = st.number_input("Spacing between sections (m)", min_value=10, value=100, step=10, key="gis_spacing")
+
+    sections = list(summary_df["Section"])
+    coords = simulate_section_coords(sections, start_lat, start_lon, bearing, spacing)
+    map_df = coords.merge(summary_df[["Section", "PCI", "Avg IRI (m/km)", "Combined Condition Rating"]], on="Section", how="left")
+    map_df["color"] = map_df["Combined Condition Rating"].map(CONDITION_COLORS).fillna("#777777")
+    map_df["size"] = spacing * 0.6
+
+    st.map(map_df, latitude="lat", longitude="lon", color="color", size="size")
+
+    st.markdown("##### Section Coordinates (simulated)")
+    st.dataframe(
+        map_df[["Section", "lat", "lon", "PCI", "Avg IRI (m/km)", "Combined Condition Rating"]],
+        use_container_width=True, height=300,
+    )
+    st.caption(
+        "🟢 Very Good · 🔵 Good · 🟡 Fair · 🔴 Poor — colours match the condition "
+        "rating used throughout the rest of the app."
+    )
+
+
+def page_report_generator():
+    st.subheader("📄 Automated Report Generator (Bonus)")
+    summary_df = st.session_state.get("_summary_df")
+    detail_df = st.session_state.get("_detail_df")
+    calc_flags = st.session_state.get("_calc_flags", [])
+    data_source = st.session_state.get("data_source")
+    hybrid_df = st.session_state.get("_hybrid_df")
+
+    if summary_df is None or summary_df.empty:
+        st.info("Load data first to generate a report.")
+        return
+
+    st.markdown(
+        "Generates a single self-contained **HTML report** — KPIs, charts, "
+        "section summary, defect detail, and (if you've visited the Hybrid "
+        "Index page) the hybrid index table — ready to download and attach "
+        "to your technical report submission."
+    )
+    st.caption(
+        "💡 No PDF library is used here on purpose (keeps the app dependency-free "
+        "and crash-resistant). Open the downloaded .html file in any browser, "
+        "then use **File → Print → Save as PDF** to get a PDF version in seconds."
+    )
+
+    if st.button("🛠️ Generate Report", type="primary"):
+        with st.spinner("Building report..."):
+            html = build_html_report(summary_df, detail_df, data_source, calc_flags, hybrid_df)
+        st.session_state["_report_html"] = html
+        st.success("Report generated below — preview it, then download.")
+
+    html = st.session_state.get("_report_html")
+    if html:
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        st.download_button(
+            "⬇️ Download Report (HTML)",
+            data=html.encode("utf-8"),
+            file_name=f"pavement_condition_report_{ts}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
+        with st.expander("👁️ Preview report", expanded=True):
+            st.components.v1.html(html, height=600, scrolling=True)
+
+
+def page_methodology():
+    st.subheader("Methodology & Assumptions")
+    st.markdown(
+        """
+This tool follows the computation logic encoded in the lecturer-provided
+workbooks `TCG633_PCI_IRI_Model.xlsx` and `TCG633_PCI_IRI_Pro_v2.xlsx`
+(see their `Lookup`, `PCI_Compute`, `IRI_Compute`, and `Settings_Summary`
+sheets). It is a **teaching simplification** of pavement evaluation practice,
+not the full ASTM D6433 deduct-curve procedure.
+
+### 1. PCI (Pavement Condition Index) — simplified deduct-value method
+
+```
+Deduct Value = Area Affected (%) × Severity Factor × Weighting Factor
+```
+
+| Defect Type | Weighting Factor | | Severity | Factor |
+|---|---|---|---|---|
+| Longitudinal Crack | 1.0 | | Low | 0.6 |
+| Alligator (Fatigue) Crack | 1.6 | | Medium | 1.0 |
+| Potholes | 2.2 | | High | 1.4 |
+| Raveling | 1.2 | | | |
+| Depression/Sag | 1.4 | | | |
+| Patching (Failed) | 1.8 | | | |
+| Bleeding/Flushing | 1.0 | | | |
+| Rut/Rutting | 1.6 | | | |
+
+For each **Section**, all Deduct Values are summed, then:
+
+```
+PCI = MAX( 0, 100 − MIN(100, ΣDeduct Value) )
+```
+
+**PCI condition classes:**
+
+| PCI Range | Condition | Recommendation |
+|---|---|---|
+| 85–100 | Very Good | Routine maintenance |
+| 70–84 | Good / Satisfactory | Preventive maintenance (crack sealing, local patching) |
+| 55–69 | Fair | Surface treatment / overlay (localized) |
+| 0–54 | Poor | Major rehabilitation / reconstruction assessment |
+
+### 2. IRI (International Roughness Index)
+
+```
+Average IRI = mean(IRI readings for that section)
+```
+
+**IRI condition classes:**
+
+| IRI (m/km) | Condition | Recommendation |
+|---|---|---|
+| < 2 | Very Good (Smooth) | Routine maintenance |
+| 2 – < 3 | Good | Preventive maintenance (localized patching/leveling) |
+| 3 – < 4 | Fair | Surface treatment / thin overlay |
+| ≥ 4 | Poor (Rough) | Structural overlay / rehabilitation |
+
+### 3. Combined (Hybrid) Condition Rating — official, used everywhere by default
+
+Following the "Hybrid mode" logic in `TCG633_PCI_IRI_Pro_v2.xlsx`
+(`Settings_Summary` sheet): when **both** PCI and IRI are available for a
+section, the **worse (more severe)** of the two condition classes governs
+the combined rating and its recommendation. If only one indicator is
+available for a section, that indicator alone determines the rating.
+
+### 4. Hybrid Index (bonus page) — numeric blend, additional to #3
+
+The **Hybrid Index** page adds a second, optional way of combining PCI and
+IRI: instead of taking the worse classification, it rescales IRI onto the
+same 0-100 scale as PCI (using the identical 85/70/55 boundary points), then
+computes a weighted average:
+
+```
+IRI Score = piecewise-linear rescale of IRI onto 0-100,
+            anchored at (0→100, 2→85, 3→70, 4→55, 6→0)
+Hybrid Index = w × PCI + (1 − w) × IRI Score      (w adjustable in-app, default 60% PCI)
+```
+
+This is clearly separated from the official rating in #3 throughout the app
+and in the downloadable report.
+
+### 5. GIS Map (bonus page) — simulated coordinates
+
+The dataset has no real GPS coordinates, so the GIS Map page **simulates**
+section positions along a straight illustrative route from a user-chosen
+start point, bearing, and spacing (default 100 m, matching the project
+brief's "100m sections"). This is explicitly labelled as simulated wherever
+it appears — replace with real survey coordinates for actual use.
+
+### 6. Automated Report Generation (bonus page)
+
+Builds a single self-contained HTML file (KPIs, inline SVG charts, full
+tables) with no additional PDF library — keeping the app's dependency
+footprint minimal and resistant to the kind of deployment breakage seen with
+optional packages on some hosting platforms. Open the file in any browser
+and use Print → Save as PDF for a PDF copy.
+
+### 7. Other assumptions made explicit by this tool
+
+- **Unrecognised defect type** → neutral weighting factor of **1.0** substituted, flagged on Dashboard.
+- **Unrecognised severity** → treated as **Medium (factor 1.0)**, flagged.
+- **Section with defect data but no IRI** → rated on **PCI only**.
+- **Section with IRI but no defect rows** → rated on **IRI only**.
+- **Per-defect "Suggested Defect Treatment"** column is supplementary general
+  guidance added by this tool, not part of the lecturer's spreadsheet, and is
+  kept visually separate from the official section-level recommendation.
+- Condition-class thresholds and recommendation wording are reproduced
+  exactly as given in the Lookup sheet of the supplied workbooks.
+        """
+    )
+    st.warning(
+        "This is a teaching/learning tool built for an academic assignment. "
+        "It should not be used for real-world pavement asset management "
+        "decisions without validation against the full ASTM D6433 / JKR "
+        "manual procedures by a qualified engineer.",
+        icon="⚠️",
+    )
+
+
+# =============================================================================
+# SIDEBAR — NAVIGATION + DATA INPUT
+# =============================================================================
+with st.sidebar:
+    pg = st.navigation(
+        [
+            st.Page(page_how_to_use, title="How to Use", icon="🏠", default=True),
+            st.Page(page_upload_preview, title="Upload & Preview", icon="📥"),
+            st.Page(page_dashboard, title="Dashboard", icon="📊"),
+            st.Page(page_detailed_results, title="Detailed Results", icon="📋"),
+            st.Page(page_charts, title="Charts", icon="📈"),
+            st.Page(page_hybrid_index, title="Hybrid Index", icon="🧮"),
+            st.Page(page_gis_map, title="GIS Map", icon="🗺️"),
+            st.Page(page_report_generator, title="Report Generator", icon="📄"),
+            st.Page(page_methodology, title="Methodology & Assumptions", icon="📐"),
+        ]
+    )
+
+    st.divider()
+    st.header("📥 Data Input")
+    uploaded_file = st.file_uploader(
+        "Upload pavement condition data (.csv, .xlsx, .xls)",
+        type=["csv", "xlsx", "xls"],
+        help="Required columns: Section, Defect Type, Severity, Area Percentage (%), IRI",
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        load_sample = st.button("📊 Load Built-in Dataset", use_container_width=True)
+    with col_b:
+        clear_data = st.button("🗑️ Clear", use_container_width=True)
+
+    if clear_data:
+        st.session_state.pop("df_raw", None)
+        st.session_state.pop("data_source", None)
+        st.session_state.pop("_hybrid_df", None)
+        st.session_state.pop("_report_html", None)
+
+    if uploaded_file is not None:
+        try:
+            st.session_state["df_raw"] = read_uploaded_file(uploaded_file)
+            st.session_state["data_source"] = f"Uploaded file: {uploaded_file.name}"
+        except Exception as e:
+            st.error(
+                f"File received, but it could not be parsed: {e}\n\n"
+                "(The file chip above only confirms it was transferred to the app — "
+                "this error means the server-side step that opens/reads it failed.)"
+            )
+
+    if load_sample:
+        st.session_state["df_raw"] = generate_sample_data()
+        st.session_state["data_source"] = "Built-in dataset — TCG633 Sections 1–10 (from your completed workbook)"
+
+    st.divider()
+    if "df_raw" in st.session_state:
+        st.success(st.session_state.get("data_source", "Data loaded"))
+        st.caption(f"{len(st.session_state['df_raw'])} rows loaded")
+    else:
+        st.info("Upload a file or load the built-in dataset to begin.")
+
+    st.divider()
+    st.caption(
+        "Required columns:\n"
+        "- Section\n- Defect Type\n- Severity (Low/Medium/High)\n"
+        "- Area Percentage (%)\n- IRI (m/km)\n\n"
+        "A section may appear in several rows (one per defect). "
+        "IRI may be repeated per row or given once per section."
+    )
+
+# -----------------------------------------------------------------------------
+# RUN ANALYSIS ONCE PER RERUN (shared across whichever page is selected)
+# -----------------------------------------------------------------------------
+df_raw = st.session_state.get("df_raw")
+detail_df, summary_df, calc_flags = (None, None, [])
+if df_raw is not None and "Section" in df_raw.columns:
+    detail_df, summary_df, calc_flags = compute_results(df_raw)
+st.session_state["_detail_df"] = detail_df
+st.session_state["_summary_df"] = summary_df
+st.session_state["_calc_flags"] = calc_flags
+
+# -----------------------------------------------------------------------------
+# HEADER  (shown above every page)
+# -----------------------------------------------------------------------------
+st.title("🛣️ Digital Pavement Condition Evaluation and Maintenance Decision Tool")
+st.caption(
+    "TCG633 Bridge & Road Maintenance · Individual Project · "
+    "Fakulti Kejuruteraan Awam, UiTM Cawangan Sarawak"
 )
-st.markdown(
-    f'<div class="pms-gauge-wrap"><div class="pms-gauge-track">'
-    f'<div class="pms-gauge-dot" style="left:{max(0,min(100,row["Hybrid Index"]))}%; '
-    f'--dotcolor:{row["Condition Color"]};"></div></div></div>',
-    unsafe_allow_html=True,
-)
+st.divider()
 
-st.markdown("<br>", unsafe_allow_html=True)
+# -----------------------------------------------------------------------------
+# RUN THE SELECTED PAGE
+# -----------------------------------------------------------------------------
+pg.run()
 
-# --------------------------------------------------------------------------------------
-# Search & filter
-# --------------------------------------------------------------------------------------
-st.markdown("## 🔍 Search &amp; Filter")
-f1, f2, f3 = st.columns([2, 1, 1])
-with f1:
-    search_text = st.text_input("Search Section", placeholder="e.g. S9")
-with f2:
-    defect_opt = ["All"] + sorted(results_df["Defect Type"].unique().tolist())
-    defect_filter = st.selectbox("Defect", defect_opt)
-with f3:
-    severity_filter = st.selectbox("Severity", ["All", "Low", "Medium", "High"])
-
-filtered = results_df.copy()
-if search_text:
-    filtered = filtered[filtered["Section ID"].str.contains(search_text, case=False, na=False)]
-if defect_filter != "All":
-    filtered = filtered[filtered["Defect Type"] == defect_filter]
-if severity_filter != "All":
-    filtered = filtered[filtered["Severity"] == severity_filter]
-
-st.dataframe(
-    filtered.drop(columns=["Condition Color"]).sort_values("Section ID").reset_index(drop=True),
-    width='stretch', hide_index=True,
-)
-
-# --------------------------------------------------------------------------------------
-# Graphical analysis
-# --------------------------------------------------------------------------------------
-st.markdown("## 📊 Graphical Analysis")
-chart_df = results_df.sort_values("Section ID")
-fig = make_subplots(specs=[[{"secondary_y": True}]])
-fig.add_trace(go.Bar(x=chart_df["Section ID"], y=chart_df["PCI"], name="PCI",
-                      marker_color="#5DADE2"), secondary_y=False)
-fig.add_trace(go.Bar(x=chart_df["Section ID"], y=chart_df["Hybrid Index"], name="Hybrid Index",
-                      marker_color="#A569BD"), secondary_y=False)
-fig.add_trace(go.Scatter(x=chart_df["Section ID"], y=chart_df["IRI (m/km)"], name="IRI (m/km)",
-                          mode="lines+markers", marker_color="#F1C40F"), secondary_y=True)
-fig.update_layout(template="plotly_dark", barmode="group", height=420,
-                   paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                   legend=dict(orientation="h", y=1.1))
-fig.update_yaxes(title_text="PCI / Hybrid Index (0–100)", secondary_y=False)
-fig.update_yaxes(title_text="IRI (m/km)", secondary_y=True)
-st.plotly_chart(fig, width='stretch')
-
-# --------------------------------------------------------------------------------------
-# Extra: network map, prioritisation, report (kept for engineering-depth / rubric marks)
-# --------------------------------------------------------------------------------------
-with st.expander("🗺️ Network Condition Map & Maintenance Priority"):
-    chainage = 0
-    section_len = 100
-    fig_map = go.Figure()
-    for _, r in chart_df.iterrows():
-        fig_map.add_trace(go.Bar(x=[section_len], y=["Road"], base=[chainage], orientation="h",
-                                  marker_color=r["Condition Color"], name=r["Section ID"],
-                                  hovertext=f"{r['Section ID']} — {r['Final Condition']}", showlegend=False))
-        chainage += section_len
-    fig_map.update_layout(template="plotly_dark", barmode="stack", height=180,
-                           paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-                           xaxis_title="Chainage (m)", yaxis_visible=False,
-                           margin=dict(l=10, r=10, t=10, b=30))
-    st.plotly_chart(fig_map, width='stretch')
-
-    priority = chart_df.sort_values("Hybrid Index").reset_index(drop=True)
-    priority.index = priority.index + 1
-    priority.index.name = "Priority"
-    st.caption("Priority 1 = most urgent (lowest Hybrid Index).")
-    st.dataframe(priority[["Section ID", "Hybrid Index", "Final Condition", "Maintenance Action"]],
-                 width='stretch')
-
-with st.expander("📄 Auto-generated Maintenance Report"):
-    lines = [
-        "DIGITAL PAVEMENT MANAGEMENT SYSTEM — SUMMARY REPORT",
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-        f"Sections: {len(chart_df)}  |  Network avg PCI: {chart_df['PCI'].mean():.1f}  |  "
-        f"Network avg Hybrid Index: {chart_df['Hybrid Index'].mean():.1f}",
-        "-" * 60,
-    ]
-    for _, r in chart_df.iterrows():
-        lines.append(f"{r['Section ID']}: PCI={r['PCI']:.1f}, IRI={r['IRI (m/km)']:.2f} -> "
-                      f"{r['Final Condition']} | Action: {r['Maintenance Action']}")
-    report_text = "\n".join(lines)
-    st.text_area("Preview", report_text, height=240)
-    st.download_button("⬇️ Download report (TXT)", data=report_text.encode("utf-8"),
-                        file_name="maintenance_report.txt", mime="text/plain")
-
-st.markdown(
-    '<div style="text-align:center; color:#5b6577; padding-top:18px; font-size:0.85rem;">'
-    "TCG633 Bridge &amp; Road Maintenance — Individual Project</div>",
-    unsafe_allow_html=True,
+# -----------------------------------------------------------------------------
+# FOOTER  (shown below every page)
+# -----------------------------------------------------------------------------
+st.divider()
+st.caption(
+    "TCG633 Bridge & Road Maintenance · Digital Pavement Condition Evaluation and "
+    "Maintenance Decision Tool · Built with Streamlit · "
+    "Computation logic sourced from lecturer-provided Excel model."
 )
