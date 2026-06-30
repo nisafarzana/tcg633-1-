@@ -795,10 +795,17 @@ st.markdown(
 
 def page_how_to_use():
     st.subheader("How to Use This Tool")
+
+    st.markdown("This tool helps you evaluate road pavement condition using two standard indicators — **PCI** (Pavement Condition Index) and **IRI** (International Roughness Index) — and automatically recommends a maintenance action for each road section.")
+
+    st.divider()
+
+    # --- Step 1 ---
+    st.markdown("### Step 1 — Prepare your data")
     st.markdown(
         """
-**1. Prepare your data.**  Build a spreadsheet/CSV with one row per observed
-defect (or per IRI sample) using these columns:
+Create a spreadsheet or CSV file with **one row per defect** observed on each road section.
+Your file must contain these 5 columns:
 
 | Section | Defect Type | Severity | Area Percentage (%) | IRI |
 |---|---|---|---|---|
@@ -806,36 +813,124 @@ defect (or per IRI sample) using these columns:
 | S1 | Raveling | Low | 10 | 3.8 |
 | S2 | Longitudinal Crack | Low | 4 | 1.9 |
 
-- One **Section** can repeat across several rows — one row per defect found in that section.
-- **Severity** must be `Low`, `Medium`, or `High`.
-- **Area Percentage (%)** is the percentage of the sample area affected by that defect.
-- **IRI** (m/km) can repeat on every row of a section, or be supplied once — the
-  tool averages whatever IRI values it finds for that section.
-- You only need defect columns **or** IRI — the tool computes PCI-only,
-  IRI-only, or a combined rating depending on what's available.
-- The lecturer's own multi-sheet `TCG633_PCI_IRI_Pro` Excel template is also
-  supported directly — just upload it as-is, no reformatting needed.
+**Column explanations:**
+- **Section** — the road section ID (e.g. S1, S2, S3 ...). If a section has multiple defects, it will appear in multiple rows.
+- **Defect Type** — the type of pavement defect observed. Supported types: `Longitudinal Crack`, `Alligator (Fatigue) Crack`, `Potholes`, `Raveling`, `Depression/Sag`, `Patching (Failed)`, `Bleeding/Flushing`, `Rut/Rutting`.
+- **Severity** — must be exactly `Low`, `Medium`, or `High`.
+- **Area Percentage (%)** — how much of the section area is affected by that defect, as a percentage (e.g. `6` means 6%).
+- **IRI (m/km)** — the roughness reading for that section. You can repeat the same IRI value on every defect row for a section, or just fill it in once — the tool will average all IRI values it finds per section.
 
-**2. Upload the file** using the **Data Input** panel on the left, or click
-**Load Built-in Dataset** to try the tool immediately.
-
-**3. Explore the pages** in the sidebar:
-- **Dashboard** — KPI cards and overall network condition.
-- **Detailed Results** — section summary, defect-level computation, downloads.
-- **Charts** — PCI/IRI by section, defect distribution, condition distribution.
-- **Hybrid Index** *(bonus)* — a single 0-100 number blending PCI and IRI with
-  an adjustable weight.
-- **GIS Map** *(bonus)* — a simulated map view of sections coloured by condition.
-- **Report Generator** *(bonus)* — one-click downloadable HTML report
-  (printable to PDF from your browser).
-- **Methodology & Assumptions** — every formula and assumption, for your report.
+> **You don't need all columns.** If you only have defect data (no IRI), the tool computes PCI only. If you only have IRI (no defect data), the tool computes IRI only. Both together gives the full combined rating.
         """
     )
-    st.info(
-        "Tip for your video presentation: walk through Upload → Dashboard → "
-        "Results → Charts → Hybrid Index → GIS Map → Report — covers "
-        "'Demonstration' and 'Results' in Part B in one smooth pass.",
-        icon="🎬",
+
+    st.divider()
+
+    # --- Step 2 ---
+    st.markdown("### Step 2 — Upload your data")
+    st.markdown(
+        """
+Use the **Data Input** panel in the left sidebar to upload your file.
+
+- **Supported formats:** `.csv`, `.xlsx`, `.xls`
+- **Also supported:** the lecturer's multi-sheet `TCG633_PCI_IRI_Pro` Excel template — upload it as-is, no reformatting needed. The tool automatically reads the `PCI_Input` and `IRI_Input` sheets.
+- **No file yet?** Click **Load Built-in Dataset** in the sidebar to instantly load a pre-filled example dataset (10 road sections, S1–S10) so you can explore all the pages right away.
+
+Once uploaded, the sidebar will show a green confirmation message and the number of rows loaded. Go to **Upload & Preview** in the sidebar to see and confirm your raw data before analysis.
+        """
+    )
+
+    st.divider()
+
+    # --- Step 3 ---
+    st.markdown("### Step 3 — View your results")
+    st.markdown(
+        """
+Once data is loaded, navigate the pages in the sidebar:
+
+| Page | What you get |
+|---|---|
+| 📊 **Dashboard** | KPI summary cards (total sections, average PCI, average IRI, poor sections count) and a condition distribution chart |
+| 📋 **Detailed Results** | Full section-level summary table, defect-level computation breakdown, and download buttons |
+| 📈 **Charts** | Interactive bar charts — PCI by section, IRI by section, defect type distribution, and condition rating distribution |
+| 🧮 **Hybrid Index** | A single 0-100 score per section that blends PCI and IRI together — see Step 4 below |
+| 🗺️ **GIS Map** | A visual map showing your sections plotted by location — see Step 5 below |
+| 📄 **Report Generator** | Auto-generates a complete HTML report you can download and print as PDF |
+| 📐 **Methodology & Assumptions** | Full explanation of every formula, factor, and assumption used in all calculations |
+        """
+    )
+
+    st.divider()
+
+    # --- Step 4 ---
+    st.markdown("### Step 4 — Explore the Hybrid Index")
+    st.markdown(
+        """
+The **Dashboard**, **Detailed Results**, and **Charts** pages all use the official Combined Condition Rating — a category label (Very Good / Good / Fair / Poor) based on whichever of PCI or IRI is worse for each section.
+
+The **Hybrid Index** page adds a different, optional view: instead of a category label, it produces **one number from 0 to 100 per section**, blending PCI and IRI together into a single score.
+
+**How the Hybrid Index is calculated:**
+1. IRI is first converted onto the same 0–100 scale as PCI, using the same classification boundaries (≥85 = Very Good, ≥70 = Good, ≥55 = Fair, below 55 = Poor). This step is needed because IRI normally goes in the opposite direction — a lower IRI is better, while a higher PCI is better.
+2. A **weight slider** lets you decide how much PCI matters vs IRI. For example, if you set it to 70%:
+   > `Hybrid Index = 0.70 × PCI + 0.30 × IRI Score`
+3. The result is classified using the same bands as PCI.
+
+**When to use it:** the Hybrid Index is useful when you want to **rank sections in priority order** (the section with the lowest Hybrid Index needs attention most) or when you want a single number to display in a report chart. It supplements — but does not replace — the official Combined Condition Rating used elsewhere.
+
+**How to use the page:**
+1. Open **Hybrid Index** in the sidebar.
+2. Move the slider to set how much weight goes to PCI (default is 60%).
+3. Read the table and chart. The table also shows the IRI Score (the rescaled 0–100 version of IRI) alongside the original IRI so you can see how the conversion works.
+4. Click **Download Hybrid Index (CSV)** to save just this table.
+        """
+    )
+
+    st.divider()
+
+    # --- Step 5 ---
+    st.markdown("### Step 5 — View the GIS Map")
+    st.markdown(
+        """
+The **GIS Map** page shows your road sections plotted on an interactive map, colour-coded by condition (🟢 Very Good, 🔵 Good, 🟡 Fair, 🔴 Poor).
+
+**Important note:** pavement survey data (defect types, severity, IRI) does not include GPS coordinates, so the positions on the map are **simulated** — the sections are placed along a straight illustrative route, not their real physical locations. This is clearly labelled on the page.
+
+**The 4 controls on the GIS Map page:**
+
+| Control | What it does | Suggested value |
+|---|---|---|
+| **Start latitude** | Sets where section S1 appears on the map (north–south position) | `1.4655` — a point near Kuching, Sarawak |
+| **Start longitude** | Sets where section S1 appears on the map (east–west position) | `110.4538` |
+| **Road direction (° from North)** | The direction the simulated road runs. 0° = North, 90° = East, 180° = South, 270° = West. | `90` (runs East) |
+| **Spacing between sections (m)** | How far apart consecutive sections are placed | `100` (each section is 100m long) |
+
+**How to use the page:**
+1. Open **GIS Map** in the sidebar.
+2. Leave the defaults, or change the start point to a location on the road you are studying.
+3. The map and the section coordinate table below it update immediately.
+4. Hover over any dot on the map to see the section name and condition details.
+5. The colour of each dot reflects the **Combined Condition Rating** — so even though positions are simulated, the colour coding is based on your real computed results.
+        """
+    )
+
+    st.divider()
+
+    # --- Step 6 ---
+    st.markdown("### Step 6 — Generate and download a report")
+    st.markdown(
+        """
+The **Report Generator** page builds a complete, self-contained report in one click.
+
+1. Open **Report Generator** in the sidebar.
+2. Click **Generate Report**.
+3. A preview of the report appears below the button.
+4. Click **Download Report (HTML)** to save the file.
+5. Open the downloaded `.html` file in any web browser.
+6. To get a PDF: in the browser, press **Ctrl+P** (or **Cmd+P** on Mac) → change destination to **Save as PDF** → Save.
+
+The report includes: KPI summary, PCI and IRI charts, full section results table, defect-level detail, Hybrid Index table (if you visited that page first), and a methodology summary — everything you need for a technical report submission.
+        """
     )
 
 
