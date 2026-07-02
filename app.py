@@ -1383,15 +1383,47 @@ def page_charts():
             icon="⚠️",
         )
 
+    # ── Section filter (shared with Detailed Results) ─────────────────────────
+    all_sections = list(summary_df["Section"])
+
+    # Pre-populate from whatever was selected on the Detailed Results page
+    prior_selection = st.session_state.get("detail_section_filter", [])
+
+    selected_sections = st.multiselect(
+        "🔍 Filter by Section — select one or more (leave blank to show all)",
+        options=all_sections,
+        default=prior_selection,
+        placeholder="All sections shown — click here to filter",
+        key="charts_section_filter",
+    )
+    # Write back so Detailed Results stays in sync too
+    st.session_state["detail_section_filter"] = selected_sections
+
+    active_sections = selected_sections if selected_sections else all_sections
+
+    if selected_sections:
+        st.caption(
+            f"Showing {len(active_sections)} of {len(all_sections)} sections: "
+            + ", ".join(active_sections)
+        )
+
+    # Apply filter to both summary and detail dataframes
+    filtered_summary = summary_df[summary_df["Section"].isin(active_sections)]
+    filtered_detail  = detail_df[detail_df["Section"].isin(active_sections)] if (detail_df is not None and not detail_df.empty) else None
+    section_order    = [s for s in all_sections if s in active_sections]
+
+    st.divider()
+
+    # ── PCI by Section ────────────────────────────────────────────────────────
     st.markdown("##### PCI by Section")
-    pci_chart_df = summary_df.dropna(subset=["PCI"])
+    pci_chart_df = filtered_summary.dropna(subset=["PCI"])
     if pci_chart_df.empty:
-        st.caption("No PCI data available to chart.")
+        st.caption("No PCI data available for the selected section(s).")
     elif PLOTLY_OK:
         fig1 = px.bar(
             pci_chart_df, x="Section", y="PCI", color="PCI Condition",
             color_discrete_map=CONDITION_COLORS, text="PCI",
-            category_orders={"Section": list(summary_df["Section"])},
+            category_orders={"Section": section_order},
         )
         fig1.add_hline(y=85, line_dash="dot", line_color="#2E7D32", annotation_text="Very Good ≥85")
         fig1.add_hline(y=70, line_dash="dot", line_color="#1976D2", annotation_text="Good ≥70")
@@ -1402,15 +1434,16 @@ def page_charts():
     else:
         st.bar_chart(pci_chart_df.set_index("Section")["PCI"])
 
+    # ── IRI by Section ────────────────────────────────────────────────────────
     st.markdown("##### IRI by Section")
-    iri_chart_df = summary_df.dropna(subset=["Avg IRI (m/km)"])
+    iri_chart_df = filtered_summary.dropna(subset=["Avg IRI (m/km)"])
     if iri_chart_df.empty:
-        st.caption("No IRI data available to chart.")
+        st.caption("No IRI data available for the selected section(s).")
     elif PLOTLY_OK:
         fig2 = px.bar(
             iri_chart_df, x="Section", y="Avg IRI (m/km)", color="IRI Condition",
             color_discrete_map=CONDITION_COLORS, text="Avg IRI (m/km)",
-            category_orders={"Section": list(summary_df["Section"])},
+            category_orders={"Section": section_order},
         )
         fig2.add_hline(y=2, line_dash="dot", line_color="#2E7D32", annotation_text="Very Good <2")
         fig2.add_hline(y=3, line_dash="dot", line_color="#1976D2", annotation_text="Good <3")
@@ -1423,11 +1456,12 @@ def page_charts():
 
     colA, colB = st.columns(2)
     with colA:
+        # ── Defect Type Distribution ──────────────────────────────────────────
         st.markdown("##### Defect Type Distribution")
-        if detail_df is None or detail_df.empty:
-            st.caption("No defect-level data available to chart.")
+        if filtered_detail is None or filtered_detail.empty:
+            st.caption("No defect-level data available for the selected section(s).")
         else:
-            defect_counts = detail_df.groupby(["Defect Type", "Severity"]).size().reset_index(name="Count")
+            defect_counts = filtered_detail.groupby(["Defect Type", "Severity"]).size().reset_index(name="Count")
             if PLOTLY_OK:
                 fig3 = px.bar(
                     defect_counts, x="Defect Type", y="Count", color="Severity",
@@ -1441,8 +1475,9 @@ def page_charts():
                 st.bar_chart(pivot)
 
     with colB:
+        # ── Condition Rating Distribution ─────────────────────────────────────
         st.markdown("##### Condition Rating Distribution")
-        dist2 = summary_df["Combined Condition Rating"].value_counts().reset_index()
+        dist2 = filtered_summary["Combined Condition Rating"].value_counts().reset_index()
         dist2.columns = ["Condition", "Count"]
         if PLOTLY_OK:
             fig4 = px.bar(
@@ -1454,19 +1489,20 @@ def page_charts():
         else:
             st.bar_chart(dist2.set_index("Condition")["Count"])
 
+    # ── Defects by Section ────────────────────────────────────────────────────
     st.markdown("##### Defects by Section (stacked)")
-    if detail_df is None or detail_df.empty:
-        st.caption("No defect-level data available to chart.")
+    if filtered_detail is None or filtered_detail.empty:
+        st.caption("No defect-level data available for the selected section(s).")
     elif PLOTLY_OK:
-        by_section = detail_df.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
+        by_section = filtered_detail.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
         fig5 = px.bar(
             by_section, x="Section", y="Count", color="Defect Type", barmode="stack",
-            category_orders={"Section": list(summary_df["Section"])},
+            category_orders={"Section": section_order},
         )
         fig5.update_layout(height=380, margin=dict(t=10, b=10))
         st.plotly_chart(fig5, use_container_width=True)
     else:
-        by_section = detail_df.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
+        by_section = filtered_detail.groupby(["Section", "Defect Type"]).size().reset_index(name="Count")
         pivot2 = by_section.pivot_table(index="Section", columns="Defect Type", values="Count", fill_value=0)
         st.bar_chart(pivot2)
 
