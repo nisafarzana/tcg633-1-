@@ -518,47 +518,72 @@ def _cell_color(val, mapping: dict) -> str:
 
 
 def style_dataframe(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
-    """Apply consistent colour coding to a dataframe:
-    - Severity column  → green/amber/red for Low/Medium/High
-    - Any column whose name contains 'Condition' → condition colour bands
-    - PCI column       → gradient green→amber→red (higher = greener)
-    - Avg IRI column   → inverse gradient (lower = greener)
+    """Apply consistent colour coding to a dataframe.
+    Uses only CSS — no matplotlib/seaborn needed, so it works on any server.
+
+    - Severity  → green / amber / red for Low / Medium / High
+    - Condition columns → colour band matching the app's palette
+    - PCI number → green (≥85) / blue (≥70) / amber (≥55) / red (<55)
+    - Avg IRI   → green (<2) / blue (<3) / amber (<4) / red (≥4)
+    - Hybrid Index → same bands as PCI
     """
     styler = df.style
 
-    # applymap was renamed to map in pandas 2.1; support both
+    # pandas ≥2.1 renamed applymap → map; support both
     _applymap = getattr(styler, "map", None) or getattr(styler, "applymap")
 
-    # Severity
+    # --- Severity ---
     if "Severity" in df.columns:
         styler = _applymap(
             lambda v: _cell_color(v, SEVERITY_COLORS), subset=["Severity"]
         )
 
-    # Condition columns
+    # --- Condition label columns ---
     cond_cols = [c for c in df.columns if "Condition" in c]
     for col in cond_cols:
         styler = _applymap(
             lambda v: _cell_color(v, CONDITION_BG), subset=[col]
         )
 
-    # PCI numeric — green (high) → amber → red (low)
+    # --- PCI numeric (pure CSS, no matplotlib) ---
+    def _pci_css(v):
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if val >= 85:
+            return "background-color:#E8F5E9; color:#1B5E20; font-weight:600;"
+        if val >= 70:
+            return "background-color:#E3F2FD; color:#0D47A1; font-weight:600;"
+        if val >= 55:
+            return "background-color:#FFF8E1; color:#E65100; font-weight:600;"
+        return "background-color:#FFEBEE; color:#B71C1C; font-weight:600;"
+
     if "PCI" in df.columns:
-        styler = styler.background_gradient(
-            cmap="RdYlGn", subset=["PCI"], vmin=0, vmax=100
-        )
+        styler = _applymap(_pci_css, subset=["PCI"])
 
-    # IRI numeric — inverse: red (high roughness) → green (low roughness)
-    if "Avg IRI (m/km)" in df.columns:
-        styler = styler.background_gradient(
-            cmap="RdYlGn_r", subset=["Avg IRI (m/km)"], vmin=0, vmax=6
-        )
-
-    # Hybrid Index — same direction as PCI
     if "Hybrid Index" in df.columns:
-        styler = styler.background_gradient(
-            cmap="RdYlGn", subset=["Hybrid Index"], vmin=0, vmax=100
-        )
+        styler = _applymap(_pci_css, subset=["Hybrid Index"])
+
+    if "IRI Score (0-100)" in df.columns:
+        styler = _applymap(_pci_css, subset=["IRI Score (0-100)"])
+
+    # --- IRI numeric (lower = better, inverse of PCI) ---
+    def _iri_css(v):
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return ""
+        if val < 2:
+            return "background-color:#E8F5E9; color:#1B5E20; font-weight:600;"
+        if val < 3:
+            return "background-color:#E3F2FD; color:#0D47A1; font-weight:600;"
+        if val < 4:
+            return "background-color:#FFF8E1; color:#E65100; font-weight:600;"
+        return "background-color:#FFEBEE; color:#B71C1C; font-weight:600;"
+
+    if "Avg IRI (m/km)" in df.columns:
+        styler = _applymap(_iri_css, subset=["Avg IRI (m/km)"])
 
     return styler
 
