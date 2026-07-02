@@ -21,7 +21,6 @@
 # =============================================================================
 
 import io
-import math
 from datetime import datetime
 
 import numpy as np
@@ -492,6 +491,78 @@ def condition_badge(label: str) -> str:
     return f'<span class="badge" style="background:{color}">{label}</span>'
 
 
+# Colour maps used by style_dataframe
+SEVERITY_COLORS = {
+    "Low":    {"bg": "#E8F5E9", "fg": "#1B5E20"},   # soft green
+    "Medium": {"bg": "#FFF8E1", "fg": "#F57F17"},   # soft amber
+    "High":   {"bg": "#FFEBEE", "fg": "#B71C1C"},   # soft red
+}
+
+CONDITION_BG = {
+    "Very Good":          {"bg": "#E8F5E9", "fg": "#1B5E20"},
+    "Very Good (Smooth)": {"bg": "#E8F5E9", "fg": "#1B5E20"},
+    "Good":               {"bg": "#E3F2FD", "fg": "#0D47A1"},
+    "Good / Satisfactory":{"bg": "#E3F2FD", "fg": "#0D47A1"},
+    "Fair":               {"bg": "#FFF8E1", "fg": "#E65100"},
+    "Poor":               {"bg": "#FFEBEE", "fg": "#B71C1C"},
+    "Poor (Rough)":       {"bg": "#FFEBEE", "fg": "#B71C1C"},
+}
+
+
+def _cell_color(val, mapping: dict) -> str:
+    """Return a pandas Styler CSS string for a cell value looked up in mapping."""
+    entry = mapping.get(str(val).strip(), {})
+    if not entry:
+        return ""
+    return f"background-color: {entry['bg']}; color: {entry['fg']}; font-weight: 600;"
+
+
+def style_dataframe(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    """Apply consistent colour coding to a dataframe:
+    - Severity column  → green/amber/red for Low/Medium/High
+    - Any column whose name contains 'Condition' → condition colour bands
+    - PCI column       → gradient green→amber→red (higher = greener)
+    - Avg IRI column   → inverse gradient (lower = greener)
+    """
+    styler = df.style
+
+    # applymap was renamed to map in pandas 2.1; support both
+    _applymap = getattr(styler, "map", None) or getattr(styler, "applymap")
+
+    # Severity
+    if "Severity" in df.columns:
+        styler = _applymap(
+            lambda v: _cell_color(v, SEVERITY_COLORS), subset=["Severity"]
+        )
+
+    # Condition columns
+    cond_cols = [c for c in df.columns if "Condition" in c]
+    for col in cond_cols:
+        styler = _applymap(
+            lambda v: _cell_color(v, CONDITION_BG), subset=[col]
+        )
+
+    # PCI numeric — green (high) → amber → red (low)
+    if "PCI" in df.columns:
+        styler = styler.background_gradient(
+            cmap="RdYlGn", subset=["PCI"], vmin=0, vmax=100
+        )
+
+    # IRI numeric — inverse: red (high roughness) → green (low roughness)
+    if "Avg IRI (m/km)" in df.columns:
+        styler = styler.background_gradient(
+            cmap="RdYlGn_r", subset=["Avg IRI (m/km)"], vmin=0, vmax=6
+        )
+
+    # Hybrid Index — same direction as PCI
+    if "Hybrid Index" in df.columns:
+        styler = styler.background_gradient(
+            cmap="RdYlGn", subset=["Hybrid Index"], vmin=0, vmax=100
+        )
+
+    return styler
+
+
 # -----------------------------------------------------------------------------
 # BONUS FEATURE 1 — HYBRID INDEX (numeric PCI + IRI blend, 0-100 scale)
 # -----------------------------------------------------------------------------
@@ -557,35 +628,7 @@ def compute_hybrid_index(summary_df: pd.DataFrame, w_pci: float) -> pd.DataFrame
 
 
 # -----------------------------------------------------------------------------
-# BONUS FEATURE 2 — GIS MAPPING (simulated coordinates, native st.map)
-# -----------------------------------------------------------------------------
-# NOTE: the uploaded dataset has no real GPS coordinates (the project brief's
-# Section/Defect/Severity/Area/IRI columns don't include location data), so
-# this generates SIMULATED, illustrative coordinates by walking a straight
-# line of N x 100m sections from a user-chosen start point and bearing. This
-# is clearly labelled as simulated everywhere it appears. Uses Streamlit's
-# native st.map (pydeck-backed) — no extra geo libraries required, so this
-# stays robust against the dependency/deployment issues seen earlier.
-EARTH_RADIUS_M = 6371000.0
-
-
-def simulate_section_coords(sections: list, start_lat: float, start_lon: float,
-                             bearing_deg: float, spacing_m: float) -> pd.DataFrame:
-    bearing_rad = math.radians(bearing_deg)
-    rows = []
-    lat0_rad = math.radians(start_lat)
-    for i, sec in enumerate(sections):
-        dist = spacing_m * i
-        dlat = (dist * math.cos(bearing_rad)) / EARTH_RADIUS_M
-        dlon = (dist * math.sin(bearing_rad)) / (EARTH_RADIUS_M * math.cos(lat0_rad))
-        lat = start_lat + math.degrees(dlat)
-        lon = start_lon + math.degrees(dlon)
-        rows.append({"Section": sec, "lat": lat, "lon": lon})
-    return pd.DataFrame(rows)
-
-
-# -----------------------------------------------------------------------------
-# BONUS FEATURE 3 — AUTOMATED REPORT GENERATION (self-contained HTML)
+# BONUS FEATURE 2 — AUTOMATED REPORT GENERATION (self-contained HTML)
 # -----------------------------------------------------------------------------
 # NOTE: deliberately built with ZERO new pip dependencies (no reportlab/fpdf/
 # weasyprint) given how much trouble missing packages have already caused on
@@ -789,7 +832,7 @@ st.markdown(
 # Each function below is one entry in the sidebar navigation. Streamlit's
 # st.navigation/st.Page only executes the SELECTED page's function on each
 # rerun — this is the main reason the app should feel noticeably snappier
-# than the previous st.tabs version, especially the Charts/GIS/Report pages
+# than the previous st.tabs version, especially the Charts/Report pages
 # which do the most work.
 # =============================================================================
 
@@ -827,16 +870,44 @@ Your file must contain these 5 columns:
     st.divider()
 
     # --- Step 2 ---
-    st.markdown("### Step 2 — Upload your data")
+    st.markdown("### Step 2 — Upload your data or enter it manually")
     st.markdown(
         """
-Use the **Data Input** panel in the left sidebar to upload your file.
+You have **two ways** to get data into the tool — choose whichever suits you:
 
+**Option A — Upload a file** using the **Data Input** panel in the left sidebar.
 - **Supported formats:** `.csv`, `.xlsx`, `.xls`
 - **Also supported:** the lecturer's multi-sheet `TCG633_PCI_IRI_Pro` Excel template — upload it as-is, no reformatting needed. The tool automatically reads the `PCI_Input` and `IRI_Input` sheets.
 - **No file yet?** Click **Load Built-in Dataset** in the sidebar to instantly load a pre-filled example dataset (10 road sections, S1–S10) so you can explore all the pages right away.
 
 Once uploaded, the sidebar will show a green confirmation message and the number of rows loaded. Go to **Upload & Preview** in the sidebar to see and confirm your raw data before analysis.
+        """
+    )
+
+    st.divider()
+
+    # --- Step 2b ---
+    st.markdown("### Step 2 (Alternative) — Enter data manually")
+    st.markdown(
+        """
+If you do not have a spreadsheet file ready, you can type your data directly into the tool using the **✏️ Enter Data Manually** page in the sidebar. No file preparation needed.
+
+**How it works:**
+
+1. Open **Enter Data Manually** from the sidebar.
+2. Fill in the form at the top of the page:
+   - **Section ID** — type the section name, e.g. `S1`, `S2`, `S3`.
+   - **Defect Type** — choose from the dropdown (8 defect types supported).
+   - **Severity** — choose `Low`, `Medium`, or `High`.
+   - **Area Percentage (%)** — how much of the section surface is affected (e.g. `6` means 6%). Set to `0` if you are only recording an IRI reading.
+   - **IRI (m/km)** — the roughness value for this section. Set to `0` if you are only recording defects with no roughness reading.
+3. Click **➕ Add Row**. The row appears in the table below the form.
+4. Repeat for every defect on every section. If a section has more than one defect, add one row per defect — use the same Section ID each time (e.g. add `S1/Potholes/High/6/3.8` as one row, then `S1/Raveling/Low/10/3.8` as a second row).
+5. Made a mistake? Use the **Delete selected row** field to remove a specific row by its row number, or **Clear all rows** to start over.
+6. When all your data is entered, click **✅ Use This Data for Analysis**. The tool immediately loads your data and it becomes available on the Dashboard, Charts, Hybrid Index, and Report pages.
+7. Optionally, click **⬇️ Download as CSV** to save what you entered as a `.csv` file — you can re-upload this file later without needing to re-enter everything.
+
+> **Tip:** you can mix approaches. For example, enter your data manually first to test the tool, then download the CSV, add more rows in Excel, and re-upload it later.
         """
     )
 
@@ -854,7 +925,6 @@ Once data is loaded, navigate the pages in the sidebar:
 | 📋 **Detailed Results** | Full section-level summary table, defect-level computation breakdown, and download buttons |
 | 📈 **Charts** | Interactive bar charts — PCI by section, IRI by section, defect type distribution, and condition rating distribution |
 | 🧮 **Hybrid Index** | A single 0-100 score per section that blends PCI and IRI together — see Step 4 below |
-| 🗺️ **GIS Map** | A visual map showing your sections plotted by location — see Step 5 below |
 | 📄 **Report Generator** | Auto-generates a complete HTML report you can download and print as PDF |
 | 📐 **Methodology & Assumptions** | Full explanation of every formula, factor, and assumption used in all calculations |
         """
@@ -889,35 +959,7 @@ The **Hybrid Index** page adds a different, optional view: instead of a category
     st.divider()
 
     # --- Step 5 ---
-    st.markdown("### Step 5 — View the GIS Map")
-    st.markdown(
-        """
-The **GIS Map** page shows your road sections plotted on an interactive map, colour-coded by condition (🟢 Very Good, 🔵 Good, 🟡 Fair, 🔴 Poor).
-
-**Important note:** pavement survey data (defect types, severity, IRI) does not include GPS coordinates, so the positions on the map are **simulated** — the sections are placed along a straight illustrative route, not their real physical locations. This is clearly labelled on the page.
-
-**The 4 controls on the GIS Map page:**
-
-| Control | What it does | Suggested value |
-|---|---|---|
-| **Start latitude** | Sets where section S1 appears on the map (north–south position) | `1.4655` — a point near Kuching, Sarawak |
-| **Start longitude** | Sets where section S1 appears on the map (east–west position) | `110.4538` |
-| **Road direction (° from North)** | The direction the simulated road runs. 0° = North, 90° = East, 180° = South, 270° = West. | `90` (runs East) |
-| **Spacing between sections (m)** | How far apart consecutive sections are placed | `100` (each section is 100m long) |
-
-**How to use the page:**
-1. Open **GIS Map** in the sidebar.
-2. Leave the defaults, or change the start point to a location on the road you are studying.
-3. The map and the section coordinate table below it update immediately.
-4. Hover over any dot on the map to see the section name and condition details.
-5. The colour of each dot reflects the **Combined Condition Rating** — so even though positions are simulated, the colour coding is based on your real computed results.
-        """
-    )
-
-    st.divider()
-
-    # --- Step 6 ---
-    st.markdown("### Step 6 — Generate and download a report")
+    st.markdown("### Step 5 — Generate and download a report")
     st.markdown(
         """
 The **Report Generator** page builds a complete, self-contained report in one click.
@@ -932,6 +974,211 @@ The **Report Generator** page builds a complete, self-contained report in one cl
 The report includes: KPI summary, PCI and IRI charts, full section results table, defect-level detail, Hybrid Index table (if you visited that page first), and a methodology summary — everything you need for a technical report submission.
         """
     )
+
+
+def page_manual_entry():
+    st.subheader("✏️ Enter Data Manually")
+    st.markdown(
+        "Fill in the form below to add pavement condition data row by row. "
+        "Each row represents **one defect** observed in one road section. "
+        "When you are done adding all rows, click **✅ Use This Data for Analysis** "
+        "to send it to the Dashboard, Charts, and all other pages."
+    )
+
+    # Initialise the in-memory row list
+    if "manual_rows" not in st.session_state:
+        st.session_state["manual_rows"] = []
+
+    # ------------------------------------------------------------------ form
+    st.markdown("#### ➕ Add a new row")
+    with st.form("manual_entry_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            section_input = st.text_input(
+                "Section ID *",
+                placeholder="e.g. S1",
+                help="The road section identifier. Use the same ID for all defects in the same section.",
+            )
+        with c2:
+            defect_input = st.selectbox(
+                "Defect Type *",
+                options=[
+                    "Longitudinal Crack",
+                    "Alligator (Fatigue) Crack",
+                    "Potholes",
+                    "Raveling",
+                    "Depression/Sag",
+                    "Patching (Failed)",
+                    "Bleeding/Flushing",
+                    "Rut/Rutting",
+                ],
+                help="Select the type of pavement defect observed.",
+            )
+        with c3:
+            severity_input = st.selectbox(
+                "Severity *",
+                options=["Low", "Medium", "High"],
+                help="How severe the defect is.",
+            )
+
+        c4, c5 = st.columns(2)
+        with c4:
+            area_input = st.number_input(
+                "Area Percentage (%)",
+                min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+                help="Percentage of the section area affected by this defect (0–100).",
+            )
+        with c5:
+            iri_input = st.number_input(
+                "IRI (m/km)",
+                min_value=0.0, max_value=20.0, value=0.0, step=0.1,
+                help="International Roughness Index reading for this section (m/km). "
+                     "Leave as 0 if you are only recording defect data (no roughness measurement).",
+            )
+
+        submitted = st.form_submit_button("➕ Add Row", type="primary", use_container_width=True)
+
+    if submitted:
+        if not section_input.strip():
+            st.error("Section ID is required. Please enter a section name (e.g. S1).")
+        elif area_input == 0.0 and iri_input == 0.0:
+            st.warning(
+                "Both Area Percentage and IRI are 0. "
+                "Please enter at least one non-zero value before adding this row.",
+            )
+        else:
+            new_row = {
+                "Section": section_input.strip().upper(),
+                "Defect Type": defect_input if area_input > 0 else None,
+                "Severity": severity_input if area_input > 0 else None,
+                "Area Percentage (%)": area_input if area_input > 0 else None,
+                "IRI": iri_input if iri_input > 0 else None,
+            }
+            st.session_state["manual_rows"].append(new_row)
+            st.success(
+                f"Row added — Section **{new_row['Section']}**, "
+                f"{defect_input} ({severity_input}), "
+                f"Area {area_input}%, IRI {iri_input} m/km."
+            )
+
+    # ---------------------------------------------------------- current table
+    rows = st.session_state["manual_rows"]
+
+    if rows:
+        st.markdown(f"#### 📋 Rows entered so far ({len(rows)} total)")
+
+        preview_df = pd.DataFrame(rows)
+        preview_df = preview_df.fillna("—")
+
+        # Display with a row-number column so users can identify which to delete
+        display_df = preview_df.copy()
+        display_df.insert(0, "#", range(1, len(display_df) + 1))
+        st.dataframe(display_df, use_container_width=True, hide_index=True, height=min(400, 55 + 35 * len(rows)))
+
+        # Delete a row
+        st.markdown("#### 🗑️ Delete a row")
+        col_del, col_clr = st.columns([2, 1])
+        with col_del:
+            row_to_delete = st.number_input(
+                "Enter the row number to delete (see # column above)",
+                min_value=1, max_value=len(rows), step=1, value=1,
+                key="delete_row_num",
+            )
+            if st.button("🗑️ Delete selected row", use_container_width=True):
+                st.session_state["manual_rows"].pop(int(row_to_delete) - 1)
+                st.rerun()
+        with col_clr:
+            st.markdown("&nbsp;")
+            if st.button("🧹 Clear all rows", use_container_width=True):
+                st.session_state["manual_rows"] = []
+                st.session_state.pop("df_raw", None)
+                st.session_state.pop("data_source", None)
+                st.rerun()
+
+        st.divider()
+
+        # -------------------------------------------------- use / download
+        st.markdown("#### ✅ Use this data")
+        col_use, col_csv = st.columns(2)
+        with col_use:
+            if st.button(
+                "✅ Use This Data for Analysis",
+                type="primary",
+                use_container_width=True,
+                help="Sends all rows above to the Dashboard, Charts, Hybrid Index, and Report pages.",
+            ):
+                out_df = pd.DataFrame(rows)
+                for col in CANONICAL_COLS:
+                    if col not in out_df.columns:
+                        out_df[col] = None
+                out_df = out_df[CANONICAL_COLS]
+                st.session_state["df_raw"] = out_df
+                st.session_state["data_source"] = f"Manually entered data ({len(rows)} rows)"
+                # Clear any cached computation so it reruns with the new data
+                st.session_state.pop("_summary_df", None)
+                st.session_state.pop("_detail_df", None)
+                st.session_state.pop("_hybrid_df", None)
+                st.session_state.pop("_report_html", None)
+                st.success(
+                    f"✅ Done! {len(rows)} rows are now loaded. "
+                    "Go to **Dashboard** or **Charts** in the sidebar to see your results."
+                )
+
+        with col_csv:
+            out_df_dl = pd.DataFrame(rows)
+            for col in CANONICAL_COLS:
+                if col not in out_df_dl.columns:
+                    out_df_dl[col] = None
+            out_df_dl = out_df_dl[CANONICAL_COLS]
+            st.download_button(
+                "⬇️ Download as CSV",
+                data=out_df_dl.to_csv(index=False).encode("utf-8"),
+                file_name=f"manual_entry_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                help="Download your entered rows as a CSV file that you can re-upload later.",
+            )
+
+    else:
+        st.info(
+            "No rows added yet. Fill in the form above and click **➕ Add Row** "
+            "to start building your dataset.",
+            icon="👆",
+        )
+
+    # ---------------------------------------------------------- quick guide
+    with st.expander("📖 Tips for filling in the form", expanded=False):
+        st.markdown(
+            """
+**Section ID** — Use a short label like `S1`, `S2`, `S3` etc. All defects found on the
+same stretch of road should share the same Section ID. There is no limit on how many rows
+you can add per section.
+
+**Defect Type** — Choose from the dropdown. These match the 8 types recognised by the
+PCI calculation model. If your defect isn't in the list, choose the closest one and note
+it in your report.
+
+**Severity** — Choose `Low`, `Medium`, or `High` based on how badly the defect is
+affecting the road surface.
+
+**Area Percentage (%)** — Estimate what fraction of the section's surface area shows
+this defect. For example, if roughly 1/10 of the road is cracked, enter `10`.
+Set to `0` if you are only recording an IRI reading for this row (no defect).
+
+**IRI (m/km)** — The roughness value measured by a profilometer or similar device for
+this section. If you are only recording defects (no roughness measurement available),
+leave this as `0`. You can also repeat the same IRI value on every row of a section —
+the tool will average all values per section automatically.
+
+**Adding multiple defects per section:** simply add one row per defect, using the same
+Section ID. Example — S1 has two defects: add S1/Potholes/High/6/3.8 as one row, then
+add S1/Raveling/Low/10/3.8 as a second row.
+
+**Saving your work:** click **⬇️ Download as CSV** at any time to save your entered rows
+as a file. You can re-upload this CSV later from the sidebar without needing to re-enter
+everything.
+            """
+        )
 
 
 def page_upload_preview():
@@ -996,7 +1243,7 @@ def page_dashboard():
         st.markdown("##### Section Condition Overview")
         show_cols = ["Section", "PCI", "PCI Condition", "Avg IRI (m/km)", "IRI Condition",
                      "Combined Condition Rating", "Maintenance Recommendation"]
-        st.dataframe(summary_df[show_cols], use_container_width=True, height=380)
+        st.dataframe(style_dataframe(summary_df[show_cols]), use_container_width=True, height=380)
     with colR:
         st.markdown("##### Condition Rating Distribution")
         dist = summary_df["Combined Condition Rating"].value_counts().reset_index()
@@ -1023,7 +1270,7 @@ def page_detailed_results():
 
     st.markdown("##### 1. Section-Level Summary (PCI, IRI, Combined Rating, Recommendation)")
     display_summary = summary_df.drop(columns=["_rank"])
-    st.dataframe(display_summary, use_container_width=True, height=320)
+    st.dataframe(style_dataframe(display_summary), use_container_width=True, height=320)
 
     st.markdown("##### 2. Defect-Level Detail & Computation")
     if detail_df is None or detail_df.empty:
@@ -1033,7 +1280,7 @@ def page_detailed_results():
             "Section", "Defect Type", "Severity", "Area Percentage (%)",
             "Weighting Factor", "Severity Factor", "Deduct Value", "Suggested Defect Treatment"
         ]].reset_index(drop=True)
-        st.dataframe(detail_show, use_container_width=True, height=320)
+        st.dataframe(style_dataframe(detail_show), use_container_width=True, height=320)
         st.caption(
             "Deduct Value = Area (%) × Severity Factor × Weighting Factor. "
             "'Suggested Defect Treatment' is supplementary general guidance per "
@@ -1223,7 +1470,7 @@ def page_hybrid_index():
     st.session_state["_hybrid_df"] = hybrid_df  # cache for Report page
 
     show_cols = ["Section", "PCI", "Avg IRI (m/km)", "IRI Score (0-100)", "Hybrid Index", "Hybrid Condition"]
-    st.dataframe(hybrid_df[show_cols], use_container_width=True, height=340)
+    st.dataframe(style_dataframe(hybrid_df[show_cols]), use_container_width=True, height=340)
 
     st.markdown("##### Hybrid Index by Section")
     chart_df = hybrid_df.dropna(subset=["Hybrid Index"])
@@ -1247,51 +1494,6 @@ def page_hybrid_index():
         data=csv_bytes,
         file_name=f"hybrid_index_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv",
-    )
-
-
-def page_gis_map():
-    st.subheader("🗺️ GIS Map (Bonus — Simulated)")
-    summary_df = st.session_state.get("_summary_df")
-    if summary_df is None or summary_df.empty:
-        st.info("Load data to see the map.")
-        return
-
-    st.warning(
-        "Your dataset has no real GPS coordinates, so the positions below are "
-        "**simulated** — sections are plotted along a straight illustrative "
-        "route, spaced out using the settings you choose. Use this to "
-        "demonstrate a GIS-style view; replace with real survey coordinates "
-        "for actual asset-management use.",
-        icon="🗺️",
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        start_lat = st.number_input("Start latitude", value=1.4655, format="%.4f", key="gis_lat")
-    with c2:
-        start_lon = st.number_input("Start longitude", value=110.4538, format="%.4f", key="gis_lon")
-    with c3:
-        bearing = st.slider("Road direction (° from North)", 0, 359, 90, key="gis_bearing")
-    with c4:
-        spacing = st.number_input("Spacing between sections (m)", min_value=10, value=100, step=10, key="gis_spacing")
-
-    sections = list(summary_df["Section"])
-    coords = simulate_section_coords(sections, start_lat, start_lon, bearing, spacing)
-    map_df = coords.merge(summary_df[["Section", "PCI", "Avg IRI (m/km)", "Combined Condition Rating"]], on="Section", how="left")
-    map_df["color"] = map_df["Combined Condition Rating"].map(CONDITION_COLORS).fillna("#777777")
-    map_df["size"] = spacing * 0.6
-
-    st.map(map_df, latitude="lat", longitude="lon", color="color", size="size")
-
-    st.markdown("##### Section Coordinates (simulated)")
-    st.dataframe(
-        map_df[["Section", "lat", "lon", "PCI", "Avg IRI (m/km)", "Combined Condition Rating"]],
-        use_container_width=True, height=300,
-    )
-    st.caption(
-        "🟢 Very Good · 🔵 Good · 🟡 Fair · 🔴 Poor — colours match the condition "
-        "rating used throughout the rest of the app."
     )
 
 
@@ -1420,15 +1622,7 @@ Hybrid Index = w × PCI + (1 − w) × IRI Score      (w adjustable in-app, defa
 This is clearly separated from the official rating in #3 throughout the app
 and in the downloadable report.
 
-### 5. GIS Map (bonus page) — simulated coordinates
-
-The dataset has no real GPS coordinates, so the GIS Map page **simulates**
-section positions along a straight illustrative route from a user-chosen
-start point, bearing, and spacing (default 100 m, matching the project
-brief's "100m sections"). This is explicitly labelled as simulated wherever
-it appears — replace with real survey coordinates for actual use.
-
-### 6. Automated Report Generation (bonus page)
+### 5. Automated Report Generation (bonus page)
 
 Builds a single self-contained HTML file (KPIs, inline SVG charts, full
 tables) with no additional PDF library — keeping the app's dependency
@@ -1436,7 +1630,7 @@ footprint minimal and resistant to the kind of deployment breakage seen with
 optional packages on some hosting platforms. Open the file in any browser
 and use Print → Save as PDF for a PDF copy.
 
-### 7. Other assumptions made explicit by this tool
+### 6. Other assumptions made explicit by this tool
 
 - **Unrecognised defect type** → neutral weighting factor of **1.0** substituted, flagged on Dashboard.
 - **Unrecognised severity** → treated as **Medium (factor 1.0)**, flagged.
@@ -1466,11 +1660,11 @@ with st.sidebar:
         [
             st.Page(page_how_to_use, title="How to Use", icon="🏠", default=True),
             st.Page(page_upload_preview, title="Upload & Preview", icon="📥"),
+            st.Page(page_manual_entry, title="Enter Data Manually", icon="✏️"),
             st.Page(page_dashboard, title="Dashboard", icon="📊"),
             st.Page(page_detailed_results, title="Detailed Results", icon="📋"),
             st.Page(page_charts, title="Charts", icon="📈"),
             st.Page(page_hybrid_index, title="Hybrid Index", icon="🧮"),
-            st.Page(page_gis_map, title="GIS Map", icon="🗺️"),
             st.Page(page_report_generator, title="Report Generator", icon="📄"),
             st.Page(page_methodology, title="Methodology & Assumptions", icon="📐"),
         ]
