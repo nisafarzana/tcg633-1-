@@ -518,72 +518,27 @@ def _cell_color(val, mapping: dict) -> str:
 
 
 def style_dataframe(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
-    """Apply consistent colour coding to a dataframe.
-    Uses only CSS — no matplotlib/seaborn needed, so it works on any server.
-
-    - Severity  → green / amber / red for Low / Medium / High
-    - Condition columns → colour band matching the app's palette
-    - PCI number → green (≥85) / blue (≥70) / amber (≥55) / red (<55)
-    - Avg IRI   → green (<2) / blue (<3) / amber (<4) / red (≥4)
-    - Hybrid Index → same bands as PCI
+    """Apply colour coding to condition label and severity columns only.
+    Numeric columns (PCI, IRI values, Hybrid Index) are left uncoloured
+    so the table stays clean and easy to read.
     """
     styler = df.style
 
     # pandas ≥2.1 renamed applymap → map; support both
     _applymap = getattr(styler, "map", None) or getattr(styler, "applymap")
 
-    # --- Severity ---
+    # --- Severity labels ---
     if "Severity" in df.columns:
         styler = _applymap(
             lambda v: _cell_color(v, SEVERITY_COLORS), subset=["Severity"]
         )
 
-    # --- Condition label columns ---
+    # --- Condition label columns (any column with "Condition" in the name) ---
     cond_cols = [c for c in df.columns if "Condition" in c]
     for col in cond_cols:
         styler = _applymap(
             lambda v: _cell_color(v, CONDITION_BG), subset=[col]
         )
-
-    # --- PCI numeric (pure CSS, no matplotlib) ---
-    def _pci_css(v):
-        try:
-            val = float(v)
-        except (TypeError, ValueError):
-            return ""
-        if val >= 85:
-            return "background-color:#E8F5E9; color:#1B5E20; font-weight:600;"
-        if val >= 70:
-            return "background-color:#E3F2FD; color:#0D47A1; font-weight:600;"
-        if val >= 55:
-            return "background-color:#FFF8E1; color:#E65100; font-weight:600;"
-        return "background-color:#FFEBEE; color:#B71C1C; font-weight:600;"
-
-    if "PCI" in df.columns:
-        styler = _applymap(_pci_css, subset=["PCI"])
-
-    if "Hybrid Index" in df.columns:
-        styler = _applymap(_pci_css, subset=["Hybrid Index"])
-
-    if "IRI Score (0-100)" in df.columns:
-        styler = _applymap(_pci_css, subset=["IRI Score (0-100)"])
-
-    # --- IRI numeric (lower = better, inverse of PCI) ---
-    def _iri_css(v):
-        try:
-            val = float(v)
-        except (TypeError, ValueError):
-            return ""
-        if val < 2:
-            return "background-color:#E8F5E9; color:#1B5E20; font-weight:600;"
-        if val < 3:
-            return "background-color:#E3F2FD; color:#0D47A1; font-weight:600;"
-        if val < 4:
-            return "background-color:#FFF8E1; color:#E65100; font-weight:600;"
-        return "background-color:#FFEBEE; color:#B71C1C; font-weight:600;"
-
-    if "Avg IRI (m/km)" in df.columns:
-        styler = _applymap(_iri_css, subset=["Avg IRI (m/km)"])
 
     return styler
 
@@ -1048,27 +1003,56 @@ def page_manual_entry():
 
         c4, c5 = st.columns(2)
         with c4:
-            area_input = st.number_input(
+            area_str = st.text_input(
                 "Area Percentage (%)",
-                min_value=0.0, max_value=100.0, value=0.0, step=0.5,
-                help="Percentage of the section area affected by this defect (0–100).",
+                value="",
+                placeholder="e.g. 6.5",
+                help="Percentage of the section area affected by this defect (0–100). Type any number.",
             )
         with c5:
-            iri_input = st.number_input(
+            iri_str = st.text_input(
                 "IRI (m/km)",
-                min_value=0.0, max_value=20.0, value=0.0, step=0.1,
+                value="",
+                placeholder="e.g. 3.8",
                 help="International Roughness Index reading for this section (m/km). "
-                     "Leave as 0 if you are only recording defect data (no roughness measurement).",
+                     "Leave blank if you are only recording defect data (no roughness measurement).",
             )
 
         submitted = st.form_submit_button("➕ Add Row", type="primary", use_container_width=True)
 
     if submitted:
-        if not section_input.strip():
+        # Parse text inputs with friendly errors
+        area_input = 0.0
+        iri_input = 0.0
+        parse_ok = True
+
+        if area_str.strip():
+            try:
+                area_input = float(area_str.strip())
+                if not (0.0 <= area_input <= 100.0):
+                    st.error("Area Percentage must be between 0 and 100.")
+                    parse_ok = False
+            except ValueError:
+                st.error(f"Area Percentage — '{area_str}' is not a valid number. Please type a number like 6.5")
+                parse_ok = False
+
+        if iri_str.strip():
+            try:
+                iri_input = float(iri_str.strip())
+                if iri_input < 0:
+                    st.error("IRI cannot be negative.")
+                    parse_ok = False
+            except ValueError:
+                st.error(f"IRI — '{iri_str}' is not a valid number. Please type a number like 3.8")
+                parse_ok = False
+
+        if not parse_ok:
+            pass
+        elif not section_input.strip():
             st.error("Section ID is required. Please enter a section name (e.g. S1).")
         elif area_input == 0.0 and iri_input == 0.0:
             st.warning(
-                "Both Area Percentage and IRI are 0. "
+                "Both Area Percentage and IRI are 0 (or blank). "
                 "Please enter at least one non-zero value before adding this row.",
             )
         else:
@@ -1293,9 +1277,26 @@ def page_detailed_results():
         st.info("Load data to see detailed results.")
         return
 
-    st.markdown("##### 1. Section-Level Summary (PCI, IRI, Combined Rating, Recommendation)")
+    # ── Section filter ────────────────────────────────────────────────────────
+    all_sections = list(summary_df["Section"])
+    selected_sections = st.multiselect(
+        "🔍 Filter by Section — select one or more (leave blank to show all)",
+        options=all_sections,
+        default=[],
+        placeholder="All sections shown — click here to filter",
+        key="detail_section_filter",
+    )
+    active_sections = selected_sections if selected_sections else all_sections
+
     display_summary = summary_df.drop(columns=["_rank"])
-    st.dataframe(style_dataframe(display_summary), use_container_width=True, height=320)
+    filtered_summary = display_summary[display_summary["Section"].isin(active_sections)]
+
+    if selected_sections:
+        st.caption(f"Showing {len(filtered_summary)} of {len(display_summary)} sections.")
+
+    st.markdown("##### 1. Section-Level Summary (PCI, IRI, Combined Rating, Recommendation)")
+    st.dataframe(style_dataframe(filtered_summary), use_container_width=True,
+                 height=min(600, 80 + 35 * len(filtered_summary)))
 
     st.markdown("##### 2. Defect-Level Detail & Computation")
     if detail_df is None or detail_df.empty:
@@ -1305,7 +1306,9 @@ def page_detailed_results():
             "Section", "Defect Type", "Severity", "Area Percentage (%)",
             "Weighting Factor", "Severity Factor", "Deduct Value", "Suggested Defect Treatment"
         ]].reset_index(drop=True)
-        st.dataframe(style_dataframe(detail_show), use_container_width=True, height=320)
+        filtered_detail = detail_show[detail_show["Section"].isin(active_sections)]
+        st.dataframe(style_dataframe(filtered_detail), use_container_width=True,
+                     height=min(500, 80 + 35 * len(filtered_detail)))
         st.caption(
             "Deduct Value = Area (%) × Severity Factor × Weighting Factor. "
             "'Suggested Defect Treatment' is supplementary general guidance per "
